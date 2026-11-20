@@ -2,7 +2,10 @@ import {
   roles, statuses, lines, categories, initialState, actionsFor, actionLabels,
   newTask, projectsFor, snapshotProjects, editable, transition, log, localDate,
 } from './model.js';
-import { designs, gallery, inspector, legacy, workspace } from './visuals.js';
+import { designs, legacy } from './themes.js';
+import { gallery } from './collection.js';
+import { recordHead, workspace } from './visuals.js?collection';
+import { bindGestures, restoreCollage } from './gestures.js';
 
 const main = document.querySelector('main');
 const dialog = document.querySelector('dialog');
@@ -23,9 +26,8 @@ const settings = () => viewSettings[ui] ??= {};
 const appearance = document.querySelector('#appearance');
 function syncAppearance() {
   const requested = new URL(location.href).searchParams.get('ui');
-  ui = Object.hasOwn(designs, requested) ? requested : Object.hasOwn(legacy, requested) ? legacy[requested] : 'hall';
+  ui = Object.hasOwn(designs, requested) ? requested : Object.hasOwn(legacy, requested) ? legacy[requested] : 'specimen';
   document.documentElement.dataset.ui = ui;
-  document.documentElement.classList.toggle('large-type', ui === 'access' && settings().size === 'large');
   appearance.value = ui;
 }
 
@@ -90,7 +92,9 @@ const attrs = id => `data-id="${esc(id)}"`;
 function route() {
   const [page = '', ...parts] = location.hash.slice(1).split('/');
   try {
-    return { page: page === 'designs' || Object.hasOwn(navigation, page) ? page : 'dashboard', id: decodeURIComponent(parts.join('/')) };
+    const snapshot = page === 'tasks' && parts.length === 3 && parts[1] === 'version' && /^\d+$/.test(parts[2]);
+    return { page: page === 'designs' || Object.hasOwn(navigation, page) ? page : 'dashboard',
+      id: decodeURIComponent(snapshot ? parts[0] : parts.join('/')), version: snapshot ? Number(parts[2]) : null };
   } catch {
     return { page: 'dashboard', id: '' };
   }
@@ -129,9 +133,8 @@ const newOrderButton = () => role === 'dispatcher' ? button('＋ 新建订单', 
 
 function dashboard() {
   const sample = state.tasks.find(task => task.line === 'finance' && findOrder(task).code === 'DEMO-001');
-  return workspace(ui, state, settings(), role) + `<footer class="desk-foot">
-    <span>${roles[role]} · 本机演示工作区</span><div>${newOrderButton()}
-    ${sample ? `<a class="text-link" href="${link('tasks',sample.id)}">打开示例 →</a>` : ''}</div></footer>`;
+  const sampleLink=sample ? `<a class="sample-link" href="${link('tasks',sample.id)}">办理示例委托 ↗</a>` : '';
+  return workspace(ui, state, settings(), role, sampleLink);
 }
 
 const filters = {
@@ -243,7 +246,7 @@ function taskPage(task, versionIndex) {
 
   return heading(esc(task.title), `<a class="text-link" href="${link('orders', order.id)}">${esc(order.customer)} · ${esc(order.id)}</a>
    　·　截止 ${esc(task.deadline)}　${statusTag(task)}`, `<div class="actions">${actionButtons}</div>`) +
-  `${inspector(ui,task,settings(),versionIndex)}<ol class="milestones" aria-label="任务进度">${path}</ol>
+  `<ol class="milestones" aria-label="任务进度">${path}</ol>
     <div class="content-grid">
       <div class="stack">
         ${panel('作业底稿', `<div class="panel-body">
@@ -282,20 +285,37 @@ function archivePage() {
     }), '暂无归档成果。完成客户确认后，由派单经理执行归档。'));
 }
 
-function render(versionIndex = null) {
-  currentVersion = versionIndex;
+function render(versionIndex = route().version ?? null) {
   syncAppearance();
   const { page, id } = route();
-  main.dataset.page = page;
-  document.querySelector('#breadcrumb').textContent = navigation[page]?.[0] || '方案展廊';
-  document.querySelector('#navigation').innerHTML = '<p class="nav-label">业务导航</p>' +
-    Object.entries(navigation).map(([key, [label, symbol]]) => `<a class="nav-link" href="${link(key)}"
-      ${key === page ? 'aria-current="page"' : ''}><span class="nav-icon" aria-hidden="true">${symbol}</span>${label}</a>`).join('');
   const task = page === 'tasks' ? findTask(id) : null;
+  if (!task?.versions[versionIndex]) versionIndex = null;
+  currentVersion = versionIndex;
+  main.dataset.page = page;
+  document.body.dataset.page = page;
+  document.querySelector('#navigation').innerHTML = Object.entries(navigation).map(([key, [label]]) =>
+    `<a href="${link(key)}" ${key === page ? 'aria-current="page"' : ''}>${label}<i aria-hidden="true">↗</i></a>`).join('');
   const views = { dashboard, tasks: task ? () => taskPage(task, versionIndex) : () => tasksPage(id),
     orders: () => ordersPage(id), projects: projectsPage, archive: archivePage,
     designs: () => gallery(settings()) };
-  main.innerHTML = views[page]();
+  main.innerHTML = page === 'designs' || page === 'dashboard' ? views[page]() :
+    `<div class="record">${recordHead(ui)}${views[page]()}</div>`;
+  if(task) {
+    const panels=[...main.querySelectorAll('.content-grid .panel')];
+    const directory=document.createElement('nav');
+    directory.className='record-tabs';
+    directory.setAttribute('aria-label','案内章节');
+    for(const [n,panel] of panels.entries()) {
+      panel.id='entry-'+n;
+      panel.tabIndex=-1;
+      const jump=document.createElement('button');
+      jump.textContent=panel.querySelector('h2').textContent;
+      jump.dataset.jump=panel.id;
+      directory.append(jump);
+    }
+    main.querySelector('.content-grid').before(directory);
+  }
+  restoreCollage(main,settings());
 }
 
 const input = (label, name, value = '', extra = '', type = 'text', full = false) =>
@@ -472,16 +492,18 @@ function actionDialog(task, action) {
 }
 
 main.addEventListener('click', event => {
+  const jump=event.target.closest('[data-jump]');
+  if(jump) {
+    const section=document.getElementById(jump.dataset.jump);
+    section.focus({preventScroll:true});
+    section.scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'instant':'smooth'});
+    return;
+  }
   const pick = event.target.closest('[data-set]');
   if (pick) {
     const {set:key,value} = pick.dataset;
-    if (pick.closest('.inspector')) settings().expanded = true;
-    settings()[key] = value;
-    if (key === 'today') {
-      settings().month = 0;
-      settings().day = value;
-    }
-    render(currentVersion);
+    if (key === 'queueScope') settings().ticket = 0;
+    selectInScene(key,value);
     const active = [...main.querySelectorAll('[data-set]')].find(el => el.dataset.set === key && el.dataset.value === value);
     active?.focus({preventScroll:true});
     return;
@@ -512,14 +534,63 @@ main.addEventListener('click', event => {
     (command === 'close-issue' && canEdit && issue?.reply && !issue.closed)) return issueDialog(task, command, row);
 });
 
-main.addEventListener('submit', event => {
-  if (!event.target.matches('[data-search]')) return;
-  event.preventDefault();
-  settings().query = String(new FormData(event.target).get('query') || '').trim();
-  render(currentVersion);
-  main.querySelector('#lookup')?.focus({preventScroll:true});
-  toast('共找到 ' + main.querySelectorAll('.case-list li').length + ' 项');
+let composing=false;
+function typeSearch(el) {
+  const value=el.value;
+  settings().query=value;
+  render();
+  const input=main.querySelector('#lookup');
+  input.focus({preventScroll:true});
+  if (el.selectionStart!==null) input.setSelectionRange(el.selectionStart,el.selectionEnd);
+}
+main.addEventListener('compositionstart',()=>{composing=true;});
+main.addEventListener('compositionend',event=>{
+  composing=false;
+  if(event.target.id==='lookup') typeSearch(event.target);
 });
+main.addEventListener('input',event=>{
+  if(event.target.id==='lookup' && !composing && !event.isComposing) typeSearch(event.target);
+  if(event.target.matches('[data-range]')) {
+    // Keep the native thumb under the pointer while the rest of the scene updates.
+    const control=event.target;
+    settings()[control.dataset.range]=control.value;
+    const template=document.createElement('template');
+    template.innerHTML=workspace(ui,state,settings(),role);
+    for(const selector of ['.wind-date','.wind-controls>div','.wind-list','.reticle','.scan-strip','.optic-top>span','.scan-desk>div','.scan-desk .steppers']){
+      const live=main.querySelector(selector), fresh=template.content.querySelector(selector);
+      if(live && fresh) live.replaceWith(fresh);
+    }
+    const swipe=main.querySelector('[data-swipe]');
+    if(swipe) swipe.dataset.index=control.value;
+  }
+});
+function selectInScene(key,value) {
+  const prior=settings()[key];
+  const animate=!matchMedia('(prefers-reduced-motion:reduce)').matches;
+  const moving=key==='reel'?'.exhibit-card':key==='ticket'?'.queue-ticket':null;
+  const bounds=new Map();
+  if(moving&&animate)for(const item of main.querySelectorAll(moving))bounds.set(item.dataset.value,item.getBoundingClientRect());
+  const courtImage=key==='room'?main.querySelector('.courtyard>.plate'):null;
+  const fromScale=courtImage?getComputedStyle(courtImage).transform:null;
+  settings()[key]=value;
+  render(currentVersion);
+  if(!animate)return;
+  if(moving)for(const item of main.querySelectorAll(moving)){
+    const before=bounds.get(item.dataset.value);
+    if(!before)continue;
+    const after=item.getBoundingClientRect();
+    item.animate([{translate:(before.x-after.x)+'px '+(before.y-after.y)+'px'},{translate:'0 0'}],{duration:270,easing:'cubic-bezier(.22,.72,.26,1)'});
+  }
+  if(fromScale) {
+    const plate=main.querySelector('.courtyard>.plate');
+    plate.animate([{transform:fromScale},{transform:getComputedStyle(plate).transform}],{duration:520,easing:'ease-out'});
+  }
+  if(key==='leaf'&&String(prior)!==String(value))main.querySelector('.book-leaf')?.animate([
+    {transform:'perspective(800px) rotateY(-55deg)',filter:'brightness(.81)'},
+    {transform:'perspective(800px) rotateY(0)',filter:'brightness(1)'}
+  ],{duration:340,easing:'ease-out'});
+}
+bindGestures(main,settings,selectInScene);
 main.addEventListener('change', event => {
   if (event.target.matches('[data-pick]')) {
     const key = event.target.dataset.pick;
@@ -533,9 +604,8 @@ main.addEventListener('change', event => {
       frame.src = '?ui=' + id + '&trial=1#dashboard';
       return;
     }
-    if (event.target.closest('.inspector')) settings().expanded = true;
     settings()[key] = event.target.value;
-    if (key === 'task') delete settings().version;
+    if (key === 'volume') delete settings().leaf;
     render(currentVersion);
     main.querySelector('[data-pick="' + key + '"]')?.focus({preventScroll:true});
     return;
@@ -544,7 +614,12 @@ main.addEventListener('change', event => {
     filter = event.target.value;
     location.hash = link('tasks', filter === 'all' ? '' : filter);
   }
-  if (event.target.id === 'versions') render(event.target.value === 'current' ? null : Number(event.target.value));
+  if (event.target.id === 'versions') {
+    const n=event.target.value;
+    history.replaceState(null,'',link('tasks',route().id)+(n==='current'?'':'/version/'+n));
+    render();
+    main.querySelector('#versions')?.focus({preventScroll:true});
+  }
 });
 
 selectRole.innerHTML = options(Object.entries(roles), role);
@@ -554,12 +629,16 @@ appearance.addEventListener('change', () => {
   url.searchParams.set('ui', appearance.value);
   if (route().page === 'designs') url.hash = 'dashboard';
   history.replaceState(null, '', url);
+  document.querySelector('#site-menu').hidePopover();
   render(currentVersion);
 });
+document.querySelector('#navigation').addEventListener('click',()=>document.querySelector('#site-menu').hidePopover());
 selectRole.addEventListener('change', () => {
   role = selectRole.value;
+  const prior=route();
+  if(prior.version!=null) history.replaceState(null,'',link('tasks',prior.id));
   render();
-  toast(`已切换为${roles[role]}`);
+  toast(`已切换为${roles[role]}${prior.version!=null?'，现显示当前成果':''}`);
 });
 
 window.addEventListener('hashchange', () => {

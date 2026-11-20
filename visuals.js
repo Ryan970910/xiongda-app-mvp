@@ -1,167 +1,231 @@
 import { actionsFor, actionLabels, editable, localDate, projectsFor, roles, statuses } from './model.js';
-
-export const designs = {
-  hall: ['综合办事大厅','一站检索','按事项、订单号或客户名称检索办理记录。'],
-  intake: ['一窗受理台','受理派单','选择服务订单和作业类型，核对后直接派单。'],
-  review: ['联合会审室','审核复核','并排核对提交版本、变更字段和审核意见。'],
-  archive: ['公文案卷馆','档案查阅','按客户调卷，翻看材料目录、批次和流转记录。'],
-  calendar: ['督办日历','时限督办','点选日期查看到期任务，跨月检查办理期限。'],
-  funds: ['资金核验台','财务核对','从项目预算下钻到实际录入的费用及凭证。'],
-  liaison: ['双线协办室','科研财务协同','按订单跟踪两条业务线，定位补件问题。'],
-  guide: ['事项导办册','事项指引','选择办理事项，逐步核对材料、流程和交付物。'],
-  monitor: ['运行指挥屏','运行监测','切换时限区间，筛出需要督办的具体事项。'],
-  access: ['大字办事窗口','简明办理','按办理意图分步导航，可放大文字进行操作。'],
-};
-export const legacy = { transit:'hall',proof:'review',optics:'intake',departures:'monitor',ledger:'funds',strata:'archive',swiss:'access',film:'review',weave:'liaison',stage:'guide' };
-const verdicts = { assigned:'承办人接件',working:'编制作业底稿',revision:'按意见修改',lead:'主管初审',reviewer:'经理复审',director:'总监终审',customer:'登记客户确认',complete:'待归档',archived:'查阅档案' };
-const e = value => String(value ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
-const href = (page,id) => '#' + page + (id ? '/' + encodeURIComponent(id) : '');
-const link = (label,page,id) => `<a class="c-link" href="${href(page,id)}">${e(label)} <span aria-hidden="true">↗</span></a>`;
-const tab = (key,value,label,active) => `<button type="button" class="pick" data-set="${key}" data-value="${e(value)}" aria-pressed="${String(value)===String(active)}">${e(label)}</button>`;
-const select = (key,label,items,value) => `<label class="tool-field">${e(label)}<select data-pick="${key}">${items.map(([id,name])=>`<option value="${e(id)}" ${id===value?'selected':''}>${e(name)}</option>`).join('')}</select></label>`;
-const flag = t => `<span class="gov-status s-${t.status}">${statuses[t.status]}</span>`;
-const empty = label => `<p class="gov-empty">${e(label)}</p>`;
-const money = n => new Intl.NumberFormat('zh-CN',{style:'currency',currency:'CNY'}).format(n/100);
-const title = (name,sub,right='')=>`<header class="desk-title"><div><h1>${e(name)}</h1><p>${e(sub)}</p></div>${right}</header>`;
-const box = (name,content,right='')=>`<section class="c-box"><header><h2>${e(name)}</h2>${right}</header>${content}</section>`;
-const sectionLabel = (name,small)=>`<div class="section-label"><h2>${e(name)}</h2><small>${e(small)}</small></div>`;
-const today = () => localDate();
-const inOrder = (state, id) => state.tasks.filter(t=>t.orderId===id);
-const statusGroup = t => ['complete','archived'].includes(t.status)?'settled':t.deadline<today()?'late':t.deadline<=localDate(3)?'soon':'normal';
-const getOrder = (s,t) => s.orders.find(o=>o.id===t.orderId);
-function taskRows(s, tasks, none='当前条件下没有事项。') {
-  return tasks.length?`<ul class="case-list">${tasks.map(t=>`<li><a href="${href('tasks',t.id)}"><div><small>${e(t.orderId)} · ${e(getOrder(s,t).customer)}</small><b>${e(t.title)}</b></div>${flag(t)}<time>${e(t.deadline)}</time><i aria-hidden="true">↗</i></a></li>`).join('')}</ul>`:empty(none);
+import {
+  concepts,
+  safe as e,
+  target,
+  openRecord as go,
+  art,
+  pick,
+  select,
+  source,
+  yen,
+  serial,
+  empty,
+  at,
+  steps
+} from './themes.js';
+const orderOf = (state, task) => state.orders.find((order) => order.id === task.orderId);
+const artKeys = ['specimen', 'optic', 'folio', 'print', 'court', 'ridge'];
+const sheets = ['print', 'raster', 'folio', 'optic', 'specimen', 'court'];
+const caption = (kicker, heading, body = '') =>
+  `<header class="scene-title"><p>${kicker}</p><h1>${heading}</h1>${body ? `<div>${body}</div>` : ''}</header>`;
+const taskLink = (t) => go('打开事项', 'tasks', t.id);
+const action = (cmd, id, label, row = '') =>
+  `<button class="do" data-command="${cmd}" data-id="${e(id)}" data-row="${e(row)}">${e(label)} ↗</button>`;
+function actions(t, role, state, allowed) {
+  return actionsFor(t, role, state)
+    .filter((cmd) => allowed.includes(cmd))
+    .map((cmd) => action(cmd, t.id, actionLabels[cmd]))
+    .join('');
 }
-function orderPick(s,p) {
-  const order=s.orders.find(o=>o.id===p.order)||s.orders[0];
-  return {order,control:select('order','服务订单',s.orders.map(o=>[o.id,o.customer+' · '+o.title]),order.id)};
+function specimen(s, p) {
+  const projects = s.orders.flatMap((order) =>
+    projectsFor(s, order.id).map((project) => ({ project, order }))
+  );
+  if (!projects.length) return empty('项目完成内部审核后，将在这里生成项目标本。');
+  const index = at(p.project, projects),
+    { project: j, order } = projects[index];
+  const fields = [
+      ['负责人', j.person],
+      ['研发周期', j.start + ' — ' + j.end],
+      ['项目预算', yen(j.budget)]
+    ],
+    point = at(p.pin, fields);
+  return `<div class="atlas"><div class="atlas-intro">${caption('科研立项 / PROJECT ATLAS', '研发<br>标本台')}<p>${e(j.name)}</p>
+    ${select(
+      'project',
+      '选择项目',
+      projects.map(({ project }, i) => [i, project.id + ' · ' + project.name]),
+      index
+    )}</div>
+    <figure class="atlas-plate">${art('specimen', '精密伺服装置分解示意，图中标注可操作')}<figcaption>研发装置示意　/　${e(j.id)}</figcaption>
+      ${fields.map(([name], i) => pick('pin', i, `<b>${serial(i + 1)}</b><span>${name}</span>`, point, 'map-pin pin-' + i)).join('')}</figure>
+    <div class="spec-data" aria-live="polite"><span>${serial(point + 1)} / ${fields[point][0]}</span><strong>${e(fields[point][1])}</strong>${go('所属订单', 'orders', order.id)}</div></div>`;
 }
-function taskPick(s,p,choices) {
-  const task=choices.find(t=>t.id===p.task)||choices[0];
-  return {task,control:task?select('task','选择事项',choices.map(t=>[t.id,t.title+' · '+t.orderId]),task.id):''};
+function queue(s, p, role) {
+  const groups = { open: '在办', all: '全部' },
+    group = p.queueScope === 'all' ? 'all' : 'open';
+  const tasks = s.tasks.filter((t) => group === 'all' || !['archived', 'complete'].includes(t.status));
+  const index = at(p.ticket, tasks),
+    t = tasks[index];
+  return `<div class="counter">${caption('委托受理 / ON CALL', '受理候场线')}
+    <div class="queue-toolbar"><div>${Object.entries(groups)
+      .map(([k, l]) => pick('queueScope', k, l, group))
+      .join('')}</div><span>左右拖动票签</span></div>
+    ${
+      t
+        ? `<div class="ticket-track" data-swipe="ticket" data-index="${index}" data-count="${tasks.length}">
+      ${[-1, 0, 1]
+        .map((offset) => {
+          const n = index + offset,
+            item = tasks[n];
+          return item
+            ? `<button class="queue-ticket offset-${offset + 1}" data-set="ticket" data-value="${n}" aria-pressed="${n === index}">
+        <small>${item.line === 'finance' ? '财税作业' : '科研作业'}　/　${e(item.orderId)}</small><b>${serial(n + 1)}</b><span>${e(item.title)}</span><i>${statuses[item.status]}　·　${e(item.deadline)}</i></button>`
+            : `<div class="queue-end"><small>当班票夹　/　${tasks.length} 件</small><strong>${e(orderOf(s, t).customer)}</strong><span>${e(orderOf(s, t).contract)}</span></div>`;
+        })
+        .join('')}</div>
+      <div class="counter-controls">${steps('ticket', index, tasks.length, '上一张票', '下一张票')}<div>${actions(t, role, s, ['accept', 'approve'])}${taskLink(t)}</div></div>`
+        : empty('当前没有在办事项。可切换至全部委托。')
+    }</div>`;
 }
-function fieldMap(v) {
-  const m=new Map([['作业说明',v.summary],['材料索引',v.evidence]]);
-  for(const p of v.projects||[]) m.set('项目 '+p.id,[p.name,p.person,p.start+' 至 '+p.end,money(p.budget)].join(' · '));
-  for(const f of v.fees||[]) m.set('明细 '+f.id,[f.projectId,f.category,f.period,f.voucher,money(f.amount)].join(' · '));
-  return m;
+function arc(s, p) {
+  const orders = s.orders,
+    index = at(p.reel, orders),
+    order = orders[index];
+  const tasks = s.tasks.filter((t) => t.orderId === order.id);
+  return `<div class="exhibit">${caption('委托阅览 / COMMISSIONS', '委托陈列馆')}
+    <div class="card-orbit" data-swipe="reel" data-index="${index}" data-count="${orders.length}">${orders
+      .map((o, i) => {
+        const d = (i - index + orders.length) % orders.length,
+          offset = d > orders.length / 2 ? d - orders.length : d;
+        return Math.abs(offset) <= 2
+          ? `<button class="exhibit-card" style="--slot:${offset};z-index:${5 - Math.abs(offset)}" aria-pressed="${i === index}" data-set="reel" data-value="${i}">${art(artKeys[(i + 1) % artKeys.length])}<span>${e(o.id)}<b>${e(o.title)}</b></span></button>`
+          : '';
+      })
+      .join(
+        ''
+      )}</div><div class="exhibit-foot">${steps('reel', index, orders.length, '上一份委托', '下一份委托')}
+      <div><small>${e(order.contract)}　/　${tasks.length} 项作业</small><h2>${e(order.customer)}</h2></div>${go('展开委托', 'orders', order.id)}</div></div>`;
 }
-function compare(t,p,forced) {
-  if(!t.versions.length) return empty('首次提交后可查看底稿版本。');
-  const end=forced ?? Math.min(t.versions.length-1,Math.max(0,Number(p.version??t.versions.length-1)||0));
-  const prior=end?fieldMap(t.versions[end-1]):new Map();
-  const current=fieldMap(t.versions[end]);
-  const only=p.diff!=='all' && end>0;
-  const all=[...new Set([...prior.keys(),...current.keys()])];
-  const keys=all.filter(k=>!only||prior.get(k)!==current.get(k));
-  const controls=forced===undefined?select('version','提交版本',t.versions.map((_,i)=>[String(i),'V'+(i+1)]),String(end)):'';
-  return `<div class="doc-tools">${controls}<div class="picks">${tab('diff','all','全部字段',only?'changed':'all')}${tab('diff','changed','仅看变化',only?'changed':'all')}</div></div>
-    <div class="diff-grid"><div class="diff-heading"><b>${end?'上一版 V'+end:'初次提交'}</b><b>本版 V${end+1}</b></div>${keys.map(k=>`<article class="diff-line ${prior.get(k)!==current.get(k)?'changed':''}"><h3>${e(k)}</h3><div><span>${e(prior.get(k)||'—')}</span><span>${e(current.get(k)||'—')}</span></div></article>`).join('')||empty('两版字段相同。')}</div>`;
+function press(s, p) {
+  const docs = s.tasks.filter((t) => t.draft.evidence?.trim()),
+    i = at(p.printDoc, docs),
+    t = docs[i];
+  return `<div class="print-shop"><div class="press-top">${caption('底稿材料 / PRINT ROOM', '材料印刷间')}<div class="pan-pad"><button data-pan="-1" aria-label="向左移动材料画布">←</button><button data-pan="up" aria-label="向上移动材料画布">↑</button><button data-pan="down" aria-label="向下移动材料画布">↓</button><button data-pan="1" aria-label="向右移动材料画布">→</button></div></div>
+    ${
+      t
+        ? `<div class="paste-window" tabindex="0" aria-label="材料拼贴，可拖动或按四个方向键"><div class="paste-wall" style="--wall-width:${docs.length * 278 + 140}px">${docs.map((d, n) => `<button class="broadside broad-${n % 4}" style="left:${32 + 278 * n}px" data-set="printDoc" data-value="${n}" aria-pressed="${n === i}">${art(sheets[n % sheets.length])}<span>${serial(n + 1)}　/　${e(d.title)}</span></button>`).join('')}</div></div>
+    <section class="print-caption"><strong>${e(t.title)}</strong><p>${e(t.draft.evidence)}</p>${taskLink(t)}</section>`
+        : empty('登记底稿的材料索引后会出现材料印张。')
+    }</div>`;
 }
-function history(t) {
-  return `<ol class="record-log">${[...t.history].reverse().map(ev=>`<li><b>${e(ev.label)}</b><small>${e(roles[ev.role])} · ${e(new Date(ev.at).toLocaleString('zh-CN',{hour12:false}))}</small>${ev.note?`<p>${e(ev.note)}</p>`:''}</li>`).join('')}</ol>`;
+function leaves(s, p, role) {
+  const tasks = s.tasks
+    .filter((t) => t.versions.length)
+    .sort((a, b) => b.versions.length - a.versions.length);
+  const i = at(p.volume, tasks),
+    t = tasks[i];
+  if (!t) return empty('提交底稿后可追溯提交版本。');
+  const n = at(p.leaf ?? t.versions.length - 1, t.versions),
+    v = t.versions[n];
+  const total =
+    t.line === 'research'
+      ? v.projects?.reduce((a, row) => a + row.budget, 0)
+      : v.fees?.reduce((a, row) => a + row.amount, 0);
+  return `<div class="reader"><div class="reader-top">${caption('提交版次 / EDITIONS', '版本手卷')}${select(
+    'volume',
+    '选择底稿',
+    tasks.map((x, j) => [j, x.title + ' · ' + x.orderId]),
+    i
+  )}</div>
+    <div class="open-book" data-swipe="leaf" data-count="${t.versions.length}" data-index="${n}"><figure>${art('folio', '研究园区分层纸景')}<figcaption>${e(t.orderId)}<br>${e(t.title)}</figcaption></figure>
+    <article class="book-leaf" data-leaf="${n}"><small>提交版次　/　V${n + 1}</small><h2>${t.line === 'research' ? '立项底稿' : '经费底稿'}</h2><p>${e(v.summary)}</p><h3>${t.line === 'research' ? '项目预算' : '登记费用'}</h3><strong>${yen(total || 0)}</strong>
+     <p>${e(v.evidence)}</p><a class="page-ref" href="${target('tasks', t.id)}/version/${n}">查阅本版全文 ↗</a>
+     <button class="page-corner" aria-label="${n < t.versions.length - 1 ? '翻到下一版' : '翻到上一版'}" data-set="leaf" data-value="${n < t.versions.length - 1 ? n + 1 : Math.max(0, n - 1)}" ${t.versions.length === 1 ? 'disabled' : ''}></button></article></div>
+     <div class="book-tools">${steps('leaf', n, t.versions.length, '翻到上一版', '翻到下一版')}${n === t.versions.length - 1 ? actions(t, role, s, ['approve', 'return']) : ''}</div></div>`;
 }
-const home = {
-  hall(s,p) {
-    const q=(p.query||'').trim().toLowerCase(), scope=p.scope||'all';
-    const matches=s.tasks.filter(t=>(scope==='all'||t.line===scope)&&[t.title,t.orderId,getOrder(s,t).customer].some(v=>v.toLowerCase().includes(q)));
-    return `<section class="hall-hero"><div><p class="domain-label">科研项目与财税服务</p><h1>综合办事大厅</h1><form class="hall-search" data-search><label class="sr-only" for="lookup">检索事项</label><input id="lookup" name="query" type="search" maxlength="120" value="${e(q)}" placeholder="输入事项名称、客户或订单编号"><button>查询事项</button></form></div></section>
-      <div class="hall-body"><section>${sectionLabel(q?'检索结果':'办理事项',matches.length+' 项')}<div class="picks">${[['all','全部'],['research','科研服务'],['finance','财税服务']].map(([v,l])=>tab('scope',v,l,scope)).join('')}</div>${taskRows(s,matches)}</section>
-      <aside class="service-index"><h2>业务入口</h2>${[['客户与订单','orders'],['研发项目台账','projects'],['交付成果归档','archive']].map(([l,k])=>link(l,k)).join('')}</aside></div>`;
-  },
-  intake(s,p,role) {
-    const {order,control}=orderPick(s,p), kind=p.kind==='finance'?'finance':'research', step=Number(p.step||1);
-    const kinds={research:'科研立项',finance:'费用归集'};
-    const body=step===1?`<h2>选取服务订单</h2>${control}<section class="intake-ticket"><header><small>受理联</small><strong>${e(order.id)}</strong></header><h3>${e(order.customer)}</h3><dl><dt>合同编号</dt><dd>${e(order.contract)}</dd><dt>受理期限</dt><dd>${e(order.deadline)}</dd></dl></section>${tab('step',2,'继续选择事项 →',0)}`:
-    step===2?`<h2>选择受理事项</h2><div class="choice-tiles">${Object.entries(kinds).map(([k,l])=>tab('kind',k,l,kind)).join('')}</div><p>任务将分派至${kind==='research'?'科研':'财务'}承办岗位。</p>${tab('step',3,'核对派单信息 →',0)}`:
-    `<h2>核对派单信息</h2><dl class="facts"><dt>服务客户</dt><dd>${e(order.customer)}</dd><dt>订单</dt><dd>${e(order.id)}</dd><dt>受理事项</dt><dd>${kinds[kind]}</dd><dt>截止日期</dt><dd>${e(order.deadline)}</dd></dl>
-      ${role==='dispatcher'?`<button class="cta" data-command="assign" data-id="${e(order.id)}" data-kind="${kind}">填写并派发任务</button>`:'<p>切换为派单经理后可派发任务。</p>'}`;
-    return title('一窗受理台','根据委托订单发起办理')+`<div class="intake-layout"><aside class="step-rail">${['服务订单','受理事项','核对派单'].map((l,i)=>tab('step',i+1,'0'+(i+1)+'　'+l,step)).join('')}</aside><section class="intake-form">${body}</section><aside class="intake-side"><small>订单内已派</small><strong>${inOrder(s,order.id).length}</strong><h2>关联事项</h2>${taskRows(s,inOrder(s,order.id))}</aside></div>`;
-  },
-  review(s,p,role) {
-    const choices=[...s.tasks].sort((a,b)=>b.versions.length-a.versions.length);
-    const {task:t,control}=taskPick(s,p,choices);
-    const last=[...t.history].reverse().find(ev=>ev.note);
-    return title('联合会审室','比对提交底稿，核对修改依据',control)+`<div class="review-layout"><section class="proof-doc"><div class="doc-mast"><small>${e(t.orderId)}</small><h2>${e(t.title)}</h2>${flag(t)}</div>${compare(t,p)}</section>
-      <aside class="review-notes"><h2>会审意见</h2>${last?`<blockquote>${e(last.note)}<cite>${roles[last.role]} · ${e(last.label)}</cite></blockquote>`:empty('暂无书面意见。')}${link('查看完整底稿','tasks',t.id)}${actionsFor(t,role,s).filter(k=>['approve','return'].includes(k)).map(k=>`<button class="cta" data-command="${k}" data-id="${e(t.id)}">${actionLabels[k]}</button>`).join('')}</aside></div>`;
-  },
-  archive(s,p) {
-    const list=s.tasks.filter(t=>t.status==='archived'), {task:t,control}=taskPick(s,p,list);
-    if(!t) return title('公文案卷馆','科研财税服务交付卷宗')+empty('归档后可在这里查阅成果。');
-    const mode=p.leaf||'catalog', o=getOrder(s,t);
-    return title('公文案卷馆','已归档成果检索与调阅',control)+`<div class="archive-layout"><aside class="folio-cover"><small>科研财税业务档案</small><h2>交付案卷</h2><div>${e(o.customer)}</div><span>${e(o.id)}</span><b>归 档</b></aside><section class="folio-pages"><small>${e(o.contract)}　/　${e(o.year)} 年度</small><h2>${e(t.title)}</h2><div class="picks">${[['catalog','材料目录'],['log','办理记录'],['versions','版本索引']].map(([k,l])=>tab('leaf',k,l,mode)).join('')}</div>${mode==='log'?history(t):mode==='versions'?`<ol class="folio-list">${t.versions.map((v,i)=>`<li><b>V${i+1}</b>　${e(v.summary)}</li>`).join('')}</ol>`:`<dl class="facts"><dt>材料索引</dt><dd>${e(t.draft.evidence)}</dd><dt>底稿摘要</dt><dd>${e(t.draft.summary)}</dd><dt>客户确认</dt><dd>${e(t.history.findLast(ev=>ev.label===actionLabels.confirm)?.note||'已登记')}</dd></dl>`}<button class="cta" data-command="export" data-id="${e(t.id)}">下载归档记录 ↓</button></section></div>`;
-  },
-  calendar(s,p) {
-    const base=new Date(today()+'T12:00:00');base.setDate(1);base.setMonth(base.getMonth()+Number(p.month||0));
-    const y=base.getFullYear(),m=base.getMonth(),days=new Date(y,m+1,0).getDate();
-    const prefix=y+'-'+String(m+1).padStart(2,'0'), monthRows=s.tasks.filter(t=>t.deadline.startsWith(prefix));
-    const date=p.day?.startsWith(prefix)?p.day:'';
-    const cells=Array.from({length:(base.getDay()+6)%7},()=>'<i></i>');
-    for(let i=1;i<=days;i++){const d=prefix+'-'+String(i).padStart(2,'0'),num=monthRows.filter(t=>t.deadline===d).length;cells.push(`<button class="cal-day" ${d===today()?'aria-current="date"':''} data-set="day" data-value="${d}" aria-label="${d}，${num}项" aria-pressed="${date===d}"><b>${i}</b>${num?`<small>${num} 项</small>`:''}</button>`);}
-    return title('督办日历','按办理期限排查事项')+`<div class="cal-layout"><section class="month-sheet"><header>${tab('month',Number(p.month||0)-1,'上月',NaN)}<h2>${y} 年 <b>${m+1}</b> 月</h2><div class="month-actions">${tab('today',today(),'今天',NaN)}${tab('month',Number(p.month||0)+1,'下月',NaN)}</div></header><div class="cal-grid">${[...'一二三四五六日'].map(x=>`<strong>${x}</strong>`).join('')}${cells.join('')}</div></section><aside class="day-agenda"><small>办理日程</small><h2>${date||'本月事项'}</h2>${date?tab('day','','看整月','x'):''}${taskRows(s,date?monthRows.filter(t=>t.deadline===date):monthRows)}</aside></div>`;
-  },
-  funds(s,p) {
-    const {order,control}=orderPick(s,p);
-    const projects=projectsFor(s,order.id), project=projects.find(x=>x.id===p.project)||projects[0];
-    const fees=inOrder(s,order.id).filter(t=>t.line==='finance').flatMap(t=>t.draft.fees.map(row=>({...row,task:t.id})));
-    const rows=fees.filter(f=>f.projectId===project?.id), total=rows.reduce((n,f)=>n+f.amount,0), mode=p.pivot||'voucher';
-    const cats=new Map();for(const f of rows)cats.set(f.category,(cats.get(f.category)||0)+f.amount);
-    const budget=project?.budget||0;
-    const ratio=budget?total/budget:0;
-    const meter=budget?`<div class="budget-meter"><div><span>底稿登记额占预算</span><b>${(ratio*100).toLocaleString('zh-CN',{maximumFractionDigits:1})}%</b></div><i style="--share:${Math.min(100,ratio*100)}%" aria-hidden="true"></i></div>`:'';
-    const entries=mode==='category'?[...cats].map(([label,n])=>[label,money(n)]):rows.map(f=>[f.voucher+' · '+f.category,money(f.amount),f.task]);
-    return title('资金核验台','按订单核对项目预算与底稿登记额',control)+`<div class="fund-layout"><aside class="project-rail"><h2>项目索引</h2>${projects.map(pr=>tab('project',pr.id,pr.id+'　'+pr.name,project?.id)).join('')||empty('暂无通过内部审核的项目。')}</aside><section class="fund-sheet"><small>${e(project?.id||order.id)}</small><h2>${e(project?.name||'等待立项清单')}</h2><div class="fund-totals"><div><small>已批项目预算</small><b>${money(project?.budget||0)}</b></div><div><small>底稿登记额</small><b>${money(total)}</b></div></div>${meter}<div class="picks">${tab('pivot','voucher','凭证明细',mode)}${tab('pivot','category','按类别汇总',mode)}</div><ul class="amount-list">${entries.map(([l,a,id])=>`<li>${id?link(l,'tasks',id):e(l)}<b>${a}</b></li>`).join('')}</ul>${entries.length?'':empty('当前项目尚无费用明细。')}</section></div>`;
-  },
-  liaison(s,p,role) {
-    const {order,control}=orderPick(s,p), tasks=inOrder(s,order.id);
-    const mode=p.issues||'open';
-    const issues=tasks.flatMap(t=>t.issues.map(i=>({...i,task:t}))).filter(i=>mode==='all'||!i.closed);
-    return title('双线协办室','科研立项与财务归集按同一订单交接',control)+`<div class="lane-grid">${[['research','科研办理线'],['finance','财务办理线']].map(([k,l])=>`<section class="lane lane-${k}"><div><small>${e(order.id)}</small><h2>${l}</h2></div>${taskRows(s,tasks.filter(t=>t.line===k))}</section>`).join('')}</div>`+
-      box('跨线补件',`<div class="picks">${tab('issues','open','待闭环',mode)}${tab('issues','all','全部记录',mode)}</div>${issues.map(i=>`<div class="issue-row"><b>${e(i.question)}</b><span>${e(i.reply||'等待科研补充')}</span>${!i.closed && role==='research' && !i.reply ? `<button class="cta" data-command="reply" data-id="${e(i.task.id)}" data-row="${e(i.id)}">回复补件</button>` : (!i.closed && i.reply && editable(i.task,role) ? `<button class="cta" data-command="close-issue" data-id="${e(i.task.id)}" data-row="${e(i.id)}">确认关闭</button>` : link('进入处理','tasks',i.task.id))}</div>`).join('')||empty(mode==='open'?'当前订单没有待闭环补件。':'当前订单暂无补件记录。')}`);
-  },
-  guide(s,p) {
-    const guides={
-      research:['科研立项','立项会议材料、项目负责人、研发周期及预算。','登记项目和材料索引，逐级审核；重大事项由总监终审。','记录客户确认后归档，已完成内审的项目可供财务引用。'],
-      finance:['费用归集','同一订单已通过内部审核的项目清单、凭证及期间。','按实际发生额录入费用，缺项发起补件，关闭问题后提交。','留存各提交版本、凭证索引、审核意见与客户确认记录。'],
-      close:['交付归档','准备通过内部末级审核的底稿和客户签收说明。','派单经理登记确认或修改意见，修改后重新履行审核。','归档后可下载含版本和处理记录的 JSON。'],
-    };
-    const key=Object.hasOwn(guides,p.service)?p.service:'research', step=Number(p.chapter||1), g=guides[key];
-    return title('事项导办册','按办理情形查阅材料与作业要求')+`<div class="guide-layout"><aside><h2>事项目录</h2>${Object.entries(guides).map(([k,v])=>tab('service',k,v[0],key)).join('')}</aside><article class="guide-paper"><small>科研财税服务　/　办理指南</small><h2>${g[0]}</h2><div class="picks">${['材料准备','办理流程','交付成果'].map((v,i)=>tab('chapter',i+1,v,step)).join('')}</div><div class="chapter"><b>0${step}</b><p>${g[step]}</p></div>${key==='close'?link('查阅已归档成果','archive'):link('进入对应任务','tasks',key)}</article></div>`;
-  },
-  monitor(s,p) {
-    const groups={all:'全部事项',late:'已超期',soon:'三日内到期',normal:'正常在办',settled:'已完成 / 归档'}, k=Object.hasOwn(groups,p.risk)?p.risk:'all';
-    const counts=Object.fromEntries(Object.keys(groups).map(g=>[g,s.tasks.filter(t=>g==='all'||statusGroup(t)===g).length]));
-    const rows=s.tasks.filter(t=>k==='all'||statusGroup(t)===k).sort((a,b)=>a.deadline.localeCompare(b.deadline));
-    const colors={late:'#ebac97',soon:'#ebcb80',normal:'#75cdd1',settled:'#8eaecc'};
-    let edge=0;
-    const arcs=Object.entries(colors).filter(([key])=>counts[key]).map(([key,color])=>{
-      const start=edge;
-      edge+=counts[key]*100/s.tasks.length;
-      return (k==='all'||k===key?color:'#315063')+' '+start+'% '+edge+'%';
-    });
-    const ring=arcs.length?'conic-gradient('+arcs.join(', ')+')':'#315063';
-    return title('运行指挥屏','科研财税服务事项运行态势')+`<div class="monitor-grid"><aside class="monitor-total"><div class="status-dial" style="--arcs:${ring}"><span><strong>${String(counts[k]).padStart(2,'0')}</strong><small>${k==='all'?'在册办理事项':groups[k]}</small></span></div>${tab('risk','all','查看全部',k)}</aside><section class="bands">${Object.keys(groups).slice(1).map(g=>`<button data-set="risk" data-value="${g}" aria-pressed="${g===k}"><span>${groups[g]}</span><i><u style="--band:${colors[g]};width:${100*counts[g]/Math.max(1,s.tasks.length)}%"></u></i><b>${counts[g]}</b></button>`).join('')}</section></div>`+box(groups[k],taskRows(s,rows),'按截止日期排序');
-  },
-  access(s,p,role) {
-    const choices={mine:'办理我的待办',check:'查询审核事项',archive:'查找交付档案'},k=Object.hasOwn(choices,p.intent)?p.intent:'mine';
-    const rows=s.tasks.filter(t=>k==='mine'?actionsFor(t,role,s).length:k==='archive'?t.status==='archived':['lead','reviewer','director'].includes(t.status));
-    return `<section class="access-page ${p.size==='large'?'enlarged':''}">${title('大字办事窗口','选择本次要办的事项',`<div class="picks">${tab('size','base','标准字号',p.size||'base')}${tab('size','large','放大字号',p.size||'base')}</div>`)}
-      <div class="intent-grid">${Object.entries(choices).map(([id,l])=>tab('intent',id,l,k)).join('')}</div>${sectionLabel(choices[k],rows.length+' 项')}${taskRows(s,rows)}</section>`;
-  },
-};
-
-export function workspace(ui,state,p,role){return home[ui](state,p,role);}
-export function inspector(ui,t,p,index) {
-  const label=ui==='review'?'版本比对':'案卷速览', mode=p.inspect|| (ui==='review'?'diff':'card');
-  return `<details class="inspector" ${p.expanded?'open':''}><summary>${label}　<span>${e(t.orderId)}</span></summary><div class="picks">${[['card','事项信息'],['diff','版本比对'],['history','流转记录']].map(([k,l])=>tab('inspect',k,l,mode)).join('')}</div>${mode==='diff'?compare(t,p,index??undefined):mode==='history'?history(t):`<dl class="facts"><dt>当前节点</dt><dd>${verdicts[t.status]}</dd><dt>办结期限</dt><dd>${e(t.deadline)}</dd><dt>材料索引</dt><dd>${e((t.versions[index]||t.draft).evidence||'待填写')}</dd></dl>`}</details>`;
+function glyph(s, p) {
+  const query = p.query || '',
+    term = query.toLowerCase().trim();
+  const found = s.tasks.filter((t) =>
+    [t.title, t.orderId, t.draft.evidence, t.draft.summary, orderOf(s, t).customer].some((x) =>
+      x?.toLowerCase().includes(term)
+    )
+  );
+  return `<div class="type-room"><div class="type-banner">${caption('全文检索 / TYPE INDEX', '字模检索室')}${art('raster', '单色网点机械版画')}</div>
+    <label class="terminal-search"><b aria-hidden="true">⌕</b><input id="lookup" type="search" maxlength="120" autocomplete="off" placeholder="键入材料、客户或订单号" value="${e(query)}"><span>索引</span></label>
+    <div class="type-shortcuts">${['', '凭证', '耐磨', '会议'].map((q) => pick('query', q, q || '全部', query)).join('')}</div>
+    <div class="type-results"><h2 aria-live="polite">${found.length} 项匹配</h2>${found.map((t) => `<a href="${target('tasks', t.id)}"><code>${e(t.orderId)}</code><b>${e(t.title)}</b><span>${statuses[t.status]} ↗</span></a>`).join('') || empty('没有匹配项，可缩短词片或选择全部。')}</div></div>`;
 }
-export function gallery(p) {
-  const ids=Object.keys(designs), comparison=p.gallery==='pair';
-  const card=id=>`<a class="design-card" href="?ui=${id}#dashboard"><img src="./previews/${id}.webp" width="640" height="400" alt="${designs[id][0]}实际界面"><div><small>${designs[id][1]}</small><h2>${designs[id][0]}</h2><p>${designs[id][2]}</p><b>进入体验 ↗</b></div></a>`;
-  const both=[p.left||'hall',p.right||'review'];
-  return title('政务界面展廊','十套可操作的科研财税工作台，共用本浏览器的演示业务数据。')+
-    `<div class="gallery-tools picks">${tab('gallery','all','全部方案',comparison?'pair':'all')}${tab('gallery','pair','两案并排对照',comparison?'pair':'all')}</div>`+
-    (comparison?`<p class="trial-note">左右两侧均可直接操作。每侧独立试办，切换该侧方案后重新开始。</p>
-      <div class="pair-gallery">${both.map((id,i)=>`<section><header>${select(i?'right':'left',i?'右侧方案':'左侧方案',ids.map(k=>[k,designs[k][0]]),id)}<a class="c-link" href="?ui=${id}#dashboard">进入完整版 ↗</a></header><iframe title="${designs[id][0]}独立试办区" src="?ui=${id}&amp;trial=1#dashboard"></iframe></section>`).join('')}</div>`:
-    `<div class="design-grid">${ids.map(card).join('')}</div>`);
+function ridge(s, p) {
+  const dates = [...new Set(s.tasks.map((t) => t.deadline))].sort(),
+    n = at(
+      p.due ??
+        Math.max(
+          0,
+          dates.findIndex((d) => d >= localDate())
+        ),
+      dates
+    ),
+    date = dates[n];
+  const tasks = s.tasks.filter((t) => t.deadline === date);
+  return `<div class="wind-station">${art('ridge', '山脊上展开的红色野外风标')}<div class="wind-shade"></div>${caption('办理时限 / FIELD SIGNAL', '时限风标')}
+    <div class="wind-console"><div class="wind-date"><span>事项截止日期</span><b>${e(date?.slice(5).replace('-', '/') || '—')}</b></div>
+    <div class="wind-controls">${dates.length ? `<label>期限刻度<input aria-label="期限刻度" type="range" min="0" max="${dates.length - 1}" value="${n}" data-range="due"></label><div>${dates.map((d, i) => pick('due', i, e(d.slice(5)), n)).join('')}</div>` : ''}</div>
+    <div class="wind-list">${tasks.map((t) => `<a href="${target('tasks', t.id)}"><span>${statuses[t.status]}</span><b>${e(t.title)} ↗</b></a>`).join('')}</div></div></div>`;
+}
+function relay(s, p, role) {
+  const oi = at(p.signalOrder, s.orders),
+    order = s.orders[oi],
+    line = p.channel === 'research' ? 'research' : 'finance';
+  const tasks = s.tasks.filter((t) => t.orderId === order.id && t.line === line);
+  const issues = s.tasks
+    .filter((t) => t.orderId === order.id)
+    .flatMap((t) => t.issues.map((item) => ({ t, item })));
+  const messages = issues.filter(({ item }) => p.messages === 'all' || !item.closed);
+  return `<div class="relay-room"><div>${caption('订单协作 / RELAY FIELD', '协办星图')}${select(
+    'signalOrder',
+    '协办订单',
+    s.orders.map((o, i) => [i, o.customer]),
+    oi
+  )}</div>
+    <div class="network"><i class="beam beam-west"></i><i class="beam beam-east"></i><div class="network-core"><span>订单</span>${e(order.id)}</div>
+    ${pick('channel', 'research', '科研', line, 'node west')}${pick('channel', 'finance', '财务', line, 'node east')}</div>
+    <div class="signal-feed"><div><h2>${line === 'finance' ? '财务节点' : '科研节点'}</h2>${tasks.map((t) => `<a href="${target('tasks', t.id)}">${e(t.title)} ↗</a>`).join('') || empty('此订单在该节点暂无任务。')}</div>
+    <div><div class="signal-heading"><h2>补件会话</h2>${pick('messages', p.messages === 'all' ? 'open' : 'all', p.messages === 'all' ? '只看待办' : '含已关闭', null)}</div>${
+      messages
+        .map(
+          ({ t, item }) => `<article><b>${e(item.question)}</b><p>${e(item.reply || '待科研回复')}</p>
+     ${!item.closed && !item.reply && role === 'research' ? action('reply', t.id, '回复补件', item.id) : !item.closed && item.reply && editable(t, role) ? action('close-issue', t.id, '确认关闭', item.id) : taskLink(t)}</article>`
+        )
+        .join('') || empty('当前范围没有补件问题。')
+    }</div></div></div>`;
+}
+function optic(s, p) {
+  const fees = s.tasks
+    .filter((t) => t.line === 'finance')
+    .flatMap((t) => t.draft.fees.map((f) => ({ f, t })));
+  if (!fees.length) return empty('费用明细录入后可在此核验凭证。');
+  const n = at(p.focus, fees),
+    { f, t } = fees[n];
+  return `<div class="optical"><div class="optic-top">${caption('经费核验 / OPTICAL SCAN', '凭证显影室')}<span>${serial(n + 1)} / ${serial(fees.length)}</span></div>
+    <div class="lens-stage" data-swipe="focus" data-index="${n}" data-count="${fees.length}">${art('optic', '金属校准盘的光学纹理')}
+    <div class="reticle" style="--fx:${25 + (50 * n) / Math.max(1, fees.length - 1)}%"><i></i></div>
+    <div class="scan-strip"><small>${e(f.voucher)}　/　${e(f.period)}</small><strong>${yen(f.amount)}</strong></div></div>
+    <div class="scan-desk"><div><span>${e(f.projectId)}　/　${e(f.category)}</span>${go('查看凭证所属底稿', 'tasks', t.id)}</div>
+    <label class="focus-wheel">调焦选凭证<input aria-label="调焦选凭证" data-range="focus" type="range" min="0" max="${fees.length - 1}" value="${n}"></label>
+    ${steps('focus', n, fees.length, '上一张凭证', '下一张凭证')}</div></div>`;
+}
+function court(s, p) {
+  const rooms = [
+    ['委托室', '客户与订单', 'orders', s.orders.length, '份委托'],
+    ['研究室', '研发项目', 'projects', s.orders.flatMap((o) => projectsFor(s, o.id)).length, '个已批项目'],
+    ['交付室', '交付归档', 'archive', s.tasks.filter((t) => t.status === 'archived').length, '件归档成果']
+  ];
+  const n = at(p.room, rooms),
+    r = rooms[n];
+  return `<div class="courtyard room-${n}">${art('court', '科研服务院落的连廊与天窗')}<div class="court-shade"></div>
+    ${caption('空间导办 / SERVICE COURT', '政务回廊')}
+    <div class="doorway" data-swipe="room" data-index="${n}" data-count="3">${rooms.map((x, i) => pick('room', i, `<i></i><span>${x[0]}</span>`, n, 'door door-' + i)).join('')}</div>
+    <div class="arrival"><div><span>${r[3]} ${r[4]}</span><h2>${r[0]}</h2></div>${go('进入' + r[1], r[2])}</div></div>`;
+}
+const views = { specimen, queue, arc, press, leaves, glyph, ridge, relay, optic, court };
+export function workspace(ui, s, p, role, related = '') {
+  const c = concepts[ui];
+  return `<section class="scene scene-${ui}">${views[ui](s, p, role)}</section><footer class="colophon"><span>政务试办　·　虚构数据</span>${source(c)}${related}<a href="#designs">切换设计 ↗</a></footer>`;
+}
+export function recordHead(ui) {
+  const c = concepts[ui];
+  return `<div class="record-band"><a href="#dashboard">← ${c.name}</a><span>政务试办 / 业务记录</span></div>`;
 }

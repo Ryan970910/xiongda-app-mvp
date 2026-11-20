@@ -3,31 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="使用虚构数据体验科研立项、费用归集、逐级审核与交付归档。">
-  <title>科研财税协同服务平台 · 政务演示</title>
-  <link rel="stylesheet" href="./styles.css">
-  <link rel="stylesheet" href="./designs.css">
-  <script type="module" src="./app.js"></script>
+  <meta name="description" content="科研财税政务协作原型。使用虚构资料试办科研立项、财务归集、审核及归档。">
+  <title>研务 · 科研财税政务协作</title>
+  <link rel="stylesheet" href="./styles.css?v=collection">
+  <link rel="stylesheet" href="./designs.css?v=collection">
+  <link rel="stylesheet" href="./type.css?v=collection">
+  <link rel="preload" href="./assets/fonts/body.woff2" as="font" type="font/woff2" crossorigin>
+  <script type="module" src="./app.js?v=collection"></script>
 </head>
 <body>
   <a href="#main" class="skip">跳到主内容</a>
-  <div class="shell">
-    <aside class="sidebar" aria-label="主导航">
-      <a class="brand" href="#dashboard"><span class="portal-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>科研财税协同服务平台<small>政务服务 · 业务办理</small></span></a>
-      <nav id="navigation"></nav>
-      <div class="sandbox"><span></span><div><strong>演示环境</strong><small>仅使用虚构资料，进度保存在本机浏览器。</small></div></div>
-    </aside>
-    <div class="workspace">
-      <header class="topbar">
-        <div class="crumb"><span>业务办理</span><span aria-hidden="true">/</span><strong id="breadcrumb">工作台</strong></div>
-        <div class="visual-tools"><a href="#designs">方案展廊</a><select id="appearance" aria-label="切换视觉方案"></select></div>
-        <div class="account"><label for="role">体验角色</label><select id="role"></select></div>
-      </header>
-      <main id="main" tabindex="-1"></main>
+  <header class="mast">
+    <a class="wordmark" href="#dashboard" aria-label="研务工作台"><i aria-hidden="true"></i>研务<span>科研财税政务协作</span></a>
+    <div class="mast-tools">
+      <a class="collection-link" href="#designs">设计选集</a>
+      <button class="menu-switch" popovertarget="site-menu" aria-label="打开业务目录">业务目录 <b>☰</b></button>
+      <label class="role-switch"><span>试办角色</span><select id="role" aria-label="试办角色"></select></label>
     </div>
+  </header>
+  <div id="site-menu" popover>
+    <button class="menu-close" popovertarget="site-menu" popovertargetaction="hide" aria-label="关闭业务目录">×</button>
+    <strong>业务目录</strong><nav id="navigation"></nav>
+    <label>当前设计<select id="appearance"></select></label>
   </div>
+  <main id="main" tabindex="-1"></main>
   <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
   <div id="notice" role="status" aria-live="polite"></div>
-  <noscript>请启用 JavaScript 后使用此演示。</noscript>
-</body>
-</html>
+  <noscript>请启用 JavaScript 后使用科研财税演示。</noscript>
+</body></html>

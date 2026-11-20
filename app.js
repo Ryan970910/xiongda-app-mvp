@@ -83,9 +83,9 @@ function panel(title, body, extra = '') {
   return `<section class="panel"><div class="panel-head"><h2>${title}</h2>${extra}</div>${body}</section>`;
 }
 
-function table(headers, rows, empty) {
+function table(headers, rows, empty, kind = '') {
   if (!rows.length) return `<p class="empty">${empty}</p>`;
-  return `<div class="table-wrap" role="region" aria-label="明细表" tabindex="0"><table>
+  return `<div class="table-wrap ${kind}" role="region" aria-label="明细表" tabindex="0"><table>
     <thead><tr>${headers.map(header => `<th scope="col">${header}</th>`).join('')}</tr></thead>
     <tbody>${rows.join('')}</tbody></table></div>`;
 }
@@ -101,7 +101,7 @@ function taskTable(tasks) {
       <span class="row-meta">${esc(findOrder(task).customer)} · ${esc(findOrder(task).id)}</span></td>
       <td>${statusTag(task)}</td><td class="${isUrgent(task) ? 'late' : ''}">${esc(task.deadline)}</td>
       <td><a class="text-link" aria-label="查看${esc(task.title)}" href="${detail}">查看 →</a></td></tr>`;
-  }), '这个筛选条件下没有任务。');
+  }), '这个筛选条件下没有任务。', 'task-table');
 }
 
 const newOrderButton = () => role === 'dispatcher' ? button('＋ 新建订单', 'order', '', 'primary') : '';

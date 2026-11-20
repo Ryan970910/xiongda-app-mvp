@@ -167,6 +167,11 @@ dialog::backdrop { background: #0f1e39a6; }
   .stat:nth-child(3) { border-left: 0; }
   .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
   .content-grid > aside { grid-template-columns: minmax(0, 1fr); }
+  .task-table table { white-space: normal; }
+  .task-table th, .task-table td { padding: 10px 8px; }
+  .task-table th:nth-child(3), .task-table td:nth-child(3) { white-space: nowrap; }
+  .task-table th:last-child, .task-table td:last-child { display: none; }
+  .task-table .row-meta { overflow-wrap: anywhere; }
   .fields { grid-template-columns: minmax(0, 1fr); }
   .crumb > span { display: none; }
 }

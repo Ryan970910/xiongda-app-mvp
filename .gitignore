@@ -1,0 +1,4 @@
+*.docx
+.local/
+docs/AI-HANDOFF.md
+docs/MVP-DESIGN.md

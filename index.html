@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="使用虚构数据体验科研立项、费用归集、逐级审核与交付归档。">
+  <title>科研财税协同 · 演示工作台</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a href="#main" class="skip">跳到主内容</a>
+  <div class="shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="#dashboard"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>科研财税协同<small>研发服务工作台</small></span></a>
+      <nav id="navigation"></nav>
+      <div class="sandbox"><span></span><div><strong>演示环境</strong><small>仅使用虚构资料，进度保存在本机浏览器。</small></div></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="crumb"><span>研发服务</span><span aria-hidden="true">/</span><strong id="breadcrumb">工作台</strong></div>
+        <div class="account"><label for="role">体验角色</label><select id="role"></select></div>
+      </header>
+      <main id="main" tabindex="-1"></main>
+    </div>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <div id="notice" role="status" aria-live="polite"></div>
+  <noscript>请启用 JavaScript 后使用此演示。</noscript>
+</body>
+</html>

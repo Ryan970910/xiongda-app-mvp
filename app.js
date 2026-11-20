@@ -1,41 +1,25 @@
 import {
   roles, statuses, lines, categories, initialState, actionsFor, actionLabels,
   newTask, projectsFor, snapshotProjects, editable, transition, log, localDate,
-} from './model.js';
-import { designs, legacy } from './themes.js';
-import { gallery } from './collection.js';
-import { recordHead, workspace } from './visuals.js?collection';
-import { bindGestures, restoreCollage } from './gestures.js';
+} from './model.js?v=classic';
 
 const main = document.querySelector('main');
 const dialog = document.querySelector('dialog');
 const selectRole = document.querySelector('#role');
 const notice = document.querySelector('#notice');
 const storageKey = 'research-finance-demo-v1';
-const trialPane = window.parent !== window && new URL(location.href).searchParams.has('trial');
-document.documentElement.classList.toggle('trial-pane', trialPane);
 const finished = ['complete', 'archived'];
 const checking = ['lead', 'reviewer', 'director'];
 const navigation = {
   dashboard: ['工作台', '▦'], tasks: ['任务中心', '☷'], orders: ['客户与订单', '▤'],
   projects: ['研发项目', '◇'], archive: ['交付归档', '▣'],
 };
-let ui, currentVersion = null;
-const viewSettings = Object.create(null);
-const settings = () => viewSettings[ui] ??= {};
-const appearance = document.querySelector('#appearance');
-function syncAppearance() {
-  const requested = new URL(location.href).searchParams.get('ui');
-  ui = Object.hasOwn(designs, requested) ? requested : Object.hasOwn(legacy, requested) ? legacy[requested] : 'specimen';
-  document.documentElement.dataset.ui = ui;
-  appearance.value = ui;
-}
 
 let state = initialState();
 let role = 'dispatcher';
 let storageUnavailable = false;
 try {
-  const saved = trialPane ? null : localStorage.getItem(storageKey);
+  const saved = localStorage.getItem(storageKey);
   if (saved) {
     const parsed = JSON.parse(saved);
     if (Array.isArray(parsed.orders) && Array.isArray(parsed.tasks)) {
@@ -63,7 +47,7 @@ function commit(change) {
   const next = structuredClone(state);
   change(next);
   try {
-    if (!trialPane) localStorage.setItem(storageKey, JSON.stringify(next));
+    localStorage.setItem(storageKey, JSON.stringify(next));
   } catch {
     throw new Error('浏览器无法保存进度。请启用站点存储或释放浏览器空间后重试。');
   }
@@ -93,7 +77,7 @@ function route() {
   const [page = '', ...parts] = location.hash.slice(1).split('/');
   try {
     const snapshot = page === 'tasks' && parts.length === 3 && parts[1] === 'version' && /^\d+$/.test(parts[2]);
-    return { page: page === 'designs' || Object.hasOwn(navigation, page) ? page : 'dashboard',
+    return { page: Object.hasOwn(navigation, page) ? page : 'dashboard',
       id: decodeURIComponent(snapshot ? parts[0] : parts.join('/')), version: snapshot ? Number(parts[2]) : null };
   } catch {
     return { page: 'dashboard', id: '' };
@@ -132,9 +116,39 @@ function taskTable(tasks) {
 const newOrderButton = () => role === 'dispatcher' ? button('＋ 新建订单', 'order', '', 'primary') : '';
 
 function dashboard() {
-  const sample = state.tasks.find(task => task.line === 'finance' && findOrder(task).code === 'DEMO-001');
-  const sampleLink=sample ? `<a class="sample-link" href="${link('tasks',sample.id)}">办理示例委托 ↗</a>` : '';
-  return workspace(ui, state, settings(), role, sampleLink);
+  const today = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
+  const pending = state.tasks.filter(task => actionsFor(task, role, state).length);
+  const example = state.tasks.find(task => task.line === 'finance' && findOrder(task).code === 'DEMO-001');
+  const metrics = [
+    ['我的待办', pending.length, '#tasks/mine'], ['待审核', state.tasks.filter(task => checking.includes(task.status)).length, '#tasks/checking'],
+    ['临期与超期', state.tasks.filter(isUrgent).length, '#tasks/urgent'],
+    ['已归档', state.tasks.filter(task => task.status === 'archived').length, '#archive'],
+  ];
+  const queue = pending.length ? `<ul class="queue">${pending.map(task => `<li><a href="${link('tasks', task.id)}">
+    <div class="split"><strong>${esc(task.title)}</strong>${statusTag(task)}</div>
+    <p>${esc(findOrder(task).customer)}</p></a></li>`).join('')}</ul>`
+    : '<p class="empty">当前角色没有待办。可切换角色继续处理其他节点。</p>';
+
+  return heading('研发服务工作台', `${today} · 当前为${roles[role]}视角`, newOrderButton()) + `
+    <section class="handoff" aria-label="研发服务流程">
+      <div><span class="eyebrow">科研与财务协同</span><h2>从立项到交付归档</h2>
+        <p class="sub">两条业务线共用订单和项目编号。</p></div>
+      <div class="flow">
+        <a href="#projects"><span class="num">01</span><strong>科研立项</strong><small>确认项目清单</small></a><span aria-hidden="true">→</span>
+        <a href="#tasks/finance"><span class="num">02</span><strong>费用归集</strong><small>关联项目与凭证</small></a><span aria-hidden="true">→</span>
+        <a href="#archive"><span class="num">03</span><strong>交付归档</strong><small>留存审核与确认</small></a>
+      </div>
+    </section>
+    <div class="stats">${metrics.map(([label, number, href]) =>
+      `<a class="stat" href="${href}"><span class="metric-label">${label}</span><strong class="metric">${number}</strong></a>`).join('')}</div>
+    <div class="content-grid">
+      ${panel('近期任务', taskTable(state.tasks.slice(0, 6)), '<a class="text-link" href="#tasks">全部任务 →</a>')}
+      <aside class="stack">
+        ${panel('我的待办', queue)}
+        ${example ? panel('从示例订单开始', '<div class="panel-body"><p>先以财务承办人接件，查看科研线已确认的立项清单。提交后切换到下一位审核人。</p></div>',
+          `<a class="text-link" href="${link('tasks', example.id)}">打开示例 →</a>`) : ''}
+      </aside>
+    </div>`;
 }
 
 const filters = {
@@ -285,37 +299,17 @@ function archivePage() {
     }), '暂无归档成果。完成客户确认后，由派单经理执行归档。'));
 }
 
-function render(versionIndex = route().version ?? null) {
-  syncAppearance();
-  const { page, id } = route();
+function render() {
+  const { page, id, version } = route();
+  document.querySelector('#breadcrumb').textContent = navigation[page][0];
+  document.querySelector('#navigation').innerHTML = '<p class="nav-label">业务导航</p>' +
+    Object.entries(navigation).map(([key, [label, symbol]]) => `<a class="nav-link" href="${link(key)}"
+      ${key === page ? 'aria-current="page"' : ''}><span class="nav-icon" aria-hidden="true">${symbol}</span>${label}</a>`).join('');
   const task = page === 'tasks' ? findTask(id) : null;
-  if (!task?.versions[versionIndex]) versionIndex = null;
-  currentVersion = versionIndex;
-  main.dataset.page = page;
-  document.body.dataset.page = page;
-  document.querySelector('#navigation').innerHTML = Object.entries(navigation).map(([key, [label]]) =>
-    `<a href="${link(key)}" ${key === page ? 'aria-current="page"' : ''}>${label}<i aria-hidden="true">↗</i></a>`).join('');
+  const versionIndex = task?.versions[version] ? version : null;
   const views = { dashboard, tasks: task ? () => taskPage(task, versionIndex) : () => tasksPage(id),
-    orders: () => ordersPage(id), projects: projectsPage, archive: archivePage,
-    designs: () => gallery(settings()) };
-  main.innerHTML = page === 'designs' || page === 'dashboard' ? views[page]() :
-    `<div class="record">${recordHead(ui)}${views[page]()}</div>`;
-  if(task) {
-    const panels=[...main.querySelectorAll('.content-grid .panel')];
-    const directory=document.createElement('nav');
-    directory.className='record-tabs';
-    directory.setAttribute('aria-label','案内章节');
-    for(const [n,panel] of panels.entries()) {
-      panel.id='entry-'+n;
-      panel.tabIndex=-1;
-      const jump=document.createElement('button');
-      jump.textContent=panel.querySelector('h2').textContent;
-      jump.dataset.jump=panel.id;
-      directory.append(jump);
-    }
-    main.querySelector('.content-grid').before(directory);
-  }
-  restoreCollage(main,settings());
+    orders: () => ordersPage(id), projects: projectsPage, archive: archivePage };
+  main.innerHTML = views[page]();
 }
 
 const input = (label, name, value = '', extra = '', type = 'text', full = false) =>
@@ -370,13 +364,13 @@ function addOrder() {
   }, '请使用虚构企业名称和编号。');
 }
 
-function assign(id, preferredKind) {
+function assign(id) {
   if (role !== 'dispatcher') return;
   const order = state.orders.find(item => item.id === id);
   const projects = projectsFor(state, id);
   const kinds = [['research', '科研 · 新立项'], ['finance', '财务 · 费用归集'],
     ...projects.map(p => [`follow/${p.id}`, `科研 · 跟进项目 ${p.id}（${p.name}）`])];
-  showDialog('派发任务', dropdown('业务线与事项', 'kind', kinds, preferredKind) +
+  showDialog('派发任务', dropdown('业务线与事项', 'kind', kinds) +
     input('任务截止日期', 'deadline', order.deadline, `max="${esc(order.deadline)}"`, 'date') +
     input('任务名称', 'title', '', 'maxlength="80"', 'text', true) +
     '<label class="check full"><input type="checkbox" name="high">重大事项，由总监终审</label>', '派单', get => {
@@ -492,27 +486,11 @@ function actionDialog(task, action) {
 }
 
 main.addEventListener('click', event => {
-  const jump=event.target.closest('[data-jump]');
-  if(jump) {
-    const section=document.getElementById(jump.dataset.jump);
-    section.focus({preventScroll:true});
-    section.scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'instant':'smooth'});
-    return;
-  }
-  const pick = event.target.closest('[data-set]');
-  if (pick) {
-    const {set:key,value} = pick.dataset;
-    if (key === 'queueScope') settings().ticket = 0;
-    selectInScene(key,value);
-    const active = [...main.querySelectorAll('[data-set]')].find(el => el.dataset.set === key && el.dataset.value === value);
-    active?.focus({preventScroll:true});
-    return;
-  }
   const control = event.target.closest('[data-command]');
   if (!control) return;
   const { command, id, row } = control.dataset;
   if (command === 'order') return addOrder();
-  if (command === 'assign') return assign(id, control.dataset.kind);
+  if (command === 'assign') return assign(id);
   const task = findTask(id);
   if (!task) return;
   const canEdit = editable(task, role);
@@ -534,82 +512,7 @@ main.addEventListener('click', event => {
     (command === 'close-issue' && canEdit && issue?.reply && !issue.closed)) return issueDialog(task, command, row);
 });
 
-let composing=false;
-function typeSearch(el) {
-  const value=el.value;
-  settings().query=value;
-  render();
-  const input=main.querySelector('#lookup');
-  input.focus({preventScroll:true});
-  if (el.selectionStart!==null) input.setSelectionRange(el.selectionStart,el.selectionEnd);
-}
-main.addEventListener('compositionstart',()=>{composing=true;});
-main.addEventListener('compositionend',event=>{
-  composing=false;
-  if(event.target.id==='lookup') typeSearch(event.target);
-});
-main.addEventListener('input',event=>{
-  if(event.target.id==='lookup' && !composing && !event.isComposing) typeSearch(event.target);
-  if(event.target.matches('[data-range]')) {
-    // Keep the native thumb under the pointer while the rest of the scene updates.
-    const control=event.target;
-    settings()[control.dataset.range]=control.value;
-    const template=document.createElement('template');
-    template.innerHTML=workspace(ui,state,settings(),role);
-    for(const selector of ['.wind-date','.wind-controls>div','.wind-list','.reticle','.scan-strip','.optic-top>span','.scan-desk>div','.scan-desk .steppers']){
-      const live=main.querySelector(selector), fresh=template.content.querySelector(selector);
-      if(live && fresh) live.replaceWith(fresh);
-    }
-    const swipe=main.querySelector('[data-swipe]');
-    if(swipe) swipe.dataset.index=control.value;
-  }
-});
-function selectInScene(key,value) {
-  const prior=settings()[key];
-  const animate=!matchMedia('(prefers-reduced-motion:reduce)').matches;
-  const moving=key==='reel'?'.exhibit-card':key==='ticket'?'.queue-ticket':null;
-  const bounds=new Map();
-  if(moving&&animate)for(const item of main.querySelectorAll(moving))bounds.set(item.dataset.value,item.getBoundingClientRect());
-  const courtImage=key==='room'?main.querySelector('.courtyard>.plate'):null;
-  const fromScale=courtImage?getComputedStyle(courtImage).transform:null;
-  settings()[key]=value;
-  render(currentVersion);
-  if(!animate)return;
-  if(moving)for(const item of main.querySelectorAll(moving)){
-    const before=bounds.get(item.dataset.value);
-    if(!before)continue;
-    const after=item.getBoundingClientRect();
-    item.animate([{translate:(before.x-after.x)+'px '+(before.y-after.y)+'px'},{translate:'0 0'}],{duration:270,easing:'cubic-bezier(.22,.72,.26,1)'});
-  }
-  if(fromScale) {
-    const plate=main.querySelector('.courtyard>.plate');
-    plate.animate([{transform:fromScale},{transform:getComputedStyle(plate).transform}],{duration:520,easing:'ease-out'});
-  }
-  if(key==='leaf'&&String(prior)!==String(value))main.querySelector('.book-leaf')?.animate([
-    {transform:'perspective(800px) rotateY(-55deg)',filter:'brightness(.81)'},
-    {transform:'perspective(800px) rotateY(0)',filter:'brightness(1)'}
-  ],{duration:340,easing:'ease-out'});
-}
-bindGestures(main,settings,selectInScene);
 main.addEventListener('change', event => {
-  if (event.target.matches('[data-pick]')) {
-    const key = event.target.dataset.pick;
-    if (key === 'left' || key === 'right') {
-      const id = event.target.value;
-      const pane = event.target.closest('section');
-      settings()[key] = id;
-      pane.querySelector('a').href = '?ui=' + id + '#dashboard';
-      const frame = pane.querySelector('iframe');
-      frame.title = designs[id][0] + '独立试办区';
-      frame.src = '?ui=' + id + '&trial=1#dashboard';
-      return;
-    }
-    settings()[key] = event.target.value;
-    if (key === 'volume') delete settings().leaf;
-    render(currentVersion);
-    main.querySelector('[data-pick="' + key + '"]')?.focus({preventScroll:true});
-    return;
-  }
   if (event.target.id === 'task-filter') {
     filter = event.target.value;
     location.hash = link('tasks', filter === 'all' ? '' : filter);
@@ -623,16 +526,6 @@ main.addEventListener('change', event => {
 });
 
 selectRole.innerHTML = options(Object.entries(roles), role);
-appearance.innerHTML = options(Object.entries(designs).map(([key,[name]]) => [key,name]));
-appearance.addEventListener('change', () => {
-  const url = new URL(location.href);
-  url.searchParams.set('ui', appearance.value);
-  if (route().page === 'designs') url.hash = 'dashboard';
-  history.replaceState(null, '', url);
-  document.querySelector('#site-menu').hidePopover();
-  render(currentVersion);
-});
-document.querySelector('#navigation').addEventListener('click',()=>document.querySelector('#site-menu').hidePopover());
 selectRole.addEventListener('change', () => {
   role = selectRole.value;
   const prior=route();

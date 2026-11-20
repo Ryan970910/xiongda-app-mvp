@@ -2,36 +2,38 @@ import {
   roles, statuses, lines, categories, initialState, actionsFor, actionLabels,
   newTask, projectsFor, snapshotProjects, editable, transition, log, localDate,
 } from './model.js';
-import { designs, gallery, visual } from './visuals.js';
+import { designs, gallery, inspector, legacy, workspace } from './visuals.js';
 
 const main = document.querySelector('main');
 const dialog = document.querySelector('dialog');
 const selectRole = document.querySelector('#role');
 const notice = document.querySelector('#notice');
 const storageKey = 'research-finance-demo-v1';
+const trialPane = window.parent !== window && new URL(location.href).searchParams.has('trial');
+document.documentElement.classList.toggle('trial-pane', trialPane);
 const finished = ['complete', 'archived'];
 const checking = ['lead', 'reviewer', 'director'];
 const navigation = {
   dashboard: ['工作台', '▦'], tasks: ['任务中心', '☷'], orders: ['客户与订单', '▤'],
   projects: ['研发项目', '◇'], archive: ['交付归档', '▣'],
 };
-let ui, currentVersion = null, spot = 0;
+let ui, currentVersion = null;
+const viewSettings = Object.create(null);
+const settings = () => viewSettings[ui] ??= {};
 const appearance = document.querySelector('#appearance');
 function syncAppearance() {
   const requested = new URL(location.href).searchParams.get('ui');
-  ui = Object.hasOwn(designs, requested) ? requested : 'transit';
+  ui = Object.hasOwn(designs, requested) ? requested : Object.hasOwn(legacy, requested) ? legacy[requested] : 'hall';
   document.documentElement.dataset.ui = ui;
+  document.documentElement.classList.toggle('large-type', ui === 'access' && settings().size === 'large');
   appearance.value = ui;
-}
-function scene(task = null, index = null) {
-  return visual(ui, { state, role, task, index, spot, esc, money: yuan, actions: actionsFor });
 }
 
 let state = initialState();
 let role = 'dispatcher';
 let storageUnavailable = false;
 try {
-  const saved = localStorage.getItem(storageKey);
+  const saved = trialPane ? null : localStorage.getItem(storageKey);
   if (saved) {
     const parsed = JSON.parse(saved);
     if (Array.isArray(parsed.orders) && Array.isArray(parsed.tasks)) {
@@ -59,7 +61,7 @@ function commit(change) {
   const next = structuredClone(state);
   change(next);
   try {
-    localStorage.setItem(storageKey, JSON.stringify(next));
+    if (!trialPane) localStorage.setItem(storageKey, JSON.stringify(next));
   } catch {
     throw new Error('浏览器无法保存进度。请启用站点存储或释放浏览器空间后重试。');
   }
@@ -126,31 +128,10 @@ function taskTable(tasks) {
 const newOrderButton = () => role === 'dispatcher' ? button('＋ 新建订单', 'order', '', 'primary') : '';
 
 function dashboard() {
-  const today = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
-  const pending = state.tasks.filter(task => actionsFor(task, role, state).length);
-  const example = state.tasks.find(task => task.line === 'finance' && findOrder(task).code === 'DEMO-001');
-  const metrics = [
-    ['我的待办', pending.length, '#tasks/mine'], ['待审核', state.tasks.filter(task => checking.includes(task.status)).length, '#tasks/checking'],
-    ['临期与超期', state.tasks.filter(isUrgent).length, '#tasks/urgent'],
-    ['已归档', state.tasks.filter(task => task.status === 'archived').length, '#archive'],
-  ];
-  const queue = pending.length ? `<ul class="queue">${pending.map(task => `<li><a href="${link('tasks', task.id)}">
-    <div class="split"><strong>${esc(task.title)}</strong>${statusTag(task)}</div>
-    <p>${esc(findOrder(task).customer)}</p></a></li>`).join('')}</ul>`
-    : '<p class="empty">当前角色没有待办。可切换角色继续处理其他节点。</p>';
-
-  return heading('研发服务工作台', `${today} · 当前为${roles[role]}视角`, newOrderButton()) + `
-    ${scene()}
-    <div class="stats">${metrics.map(([label, number, href]) =>
-      `<a class="stat" href="${href}"><span class="metric-label">${label}</span><strong class="metric">${number}</strong></a>`).join('')}</div>
-    <div class="content-grid">
-      ${panel('近期任务', taskTable(state.tasks.slice(0, 6)), '<a class="text-link" href="#tasks">全部任务 →</a>')}
-      <aside class="stack">
-        ${panel('我的待办', queue)}
-        ${example ? panel('从示例订单开始', '<div class="panel-body"><p>先以财务承办人接件，查看科研线已确认的立项清单。提交后切换到下一位审核人。</p></div>',
-          `<a class="text-link" href="${link('tasks', example.id)}">打开示例 →</a>`) : ''}
-      </aside>
-    </div>`;
+  const sample = state.tasks.find(task => task.line === 'finance' && findOrder(task).code === 'DEMO-001');
+  return workspace(ui, state, settings(), role) + `<footer class="desk-foot">
+    <span>${roles[role]} · 本机演示工作区</span><div>${newOrderButton()}
+    ${sample ? `<a class="text-link" href="${link('tasks',sample.id)}">打开示例 →</a>` : ''}</div></footer>`;
 }
 
 const filters = {
@@ -262,7 +243,7 @@ function taskPage(task, versionIndex) {
 
   return heading(esc(task.title), `<a class="text-link" href="${link('orders', order.id)}">${esc(order.customer)} · ${esc(order.id)}</a>
    　·　截止 ${esc(task.deadline)}　${statusTag(task)}`, `<div class="actions">${actionButtons}</div>`) +
-  `${scene(task, versionIndex)}<ol class="milestones" aria-label="任务进度">${path}</ol>
+  `${inspector(ui,task,settings(),versionIndex)}<ol class="milestones" aria-label="任务进度">${path}</ol>
     <div class="content-grid">
       <div class="stack">
         ${panel('作业底稿', `<div class="panel-body">
@@ -306,14 +287,14 @@ function render(versionIndex = null) {
   syncAppearance();
   const { page, id } = route();
   main.dataset.page = page;
-  document.querySelector('#breadcrumb').textContent = navigation[page]?.[0] || '界面展廊';
+  document.querySelector('#breadcrumb').textContent = navigation[page]?.[0] || '方案展廊';
   document.querySelector('#navigation').innerHTML = '<p class="nav-label">业务导航</p>' +
     Object.entries(navigation).map(([key, [label, symbol]]) => `<a class="nav-link" href="${link(key)}"
       ${key === page ? 'aria-current="page"' : ''}><span class="nav-icon" aria-hidden="true">${symbol}</span>${label}</a>`).join('');
   const task = page === 'tasks' ? findTask(id) : null;
   const views = { dashboard, tasks: task ? () => taskPage(task, versionIndex) : () => tasksPage(id),
     orders: () => ordersPage(id), projects: projectsPage, archive: archivePage,
-    designs: () => heading('界面展廊', '选择一套工作台开始体验。各方案共用本浏览器中的订单、底稿与办理进度。') + gallery(esc) };
+    designs: () => gallery(settings()) };
   main.innerHTML = views[page]();
 }
 
@@ -369,13 +350,13 @@ function addOrder() {
   }, '请使用虚构企业名称和编号。');
 }
 
-function assign(id) {
+function assign(id, preferredKind) {
   if (role !== 'dispatcher') return;
   const order = state.orders.find(item => item.id === id);
   const projects = projectsFor(state, id);
   const kinds = [['research', '科研 · 新立项'], ['finance', '财务 · 费用归集'],
     ...projects.map(p => [`follow/${p.id}`, `科研 · 跟进项目 ${p.id}（${p.name}）`])];
-  showDialog('派发任务', dropdown('业务线与事项', 'kind', kinds) +
+  showDialog('派发任务', dropdown('业务线与事项', 'kind', kinds, preferredKind) +
     input('任务截止日期', 'deadline', order.deadline, `max="${esc(order.deadline)}"`, 'date') +
     input('任务名称', 'title', '', 'maxlength="80"', 'text', true) +
     '<label class="check full"><input type="checkbox" name="high">重大事项，由总监终审</label>', '派单', get => {
@@ -491,20 +472,25 @@ function actionDialog(task, action) {
 }
 
 main.addEventListener('click', event => {
-  const frame = event.target.closest('[data-frame]');
-  if (frame) return render(Number(frame.dataset.frame));
-  const cue = event.target.closest('[data-spot]');
-  if (cue) {
-    spot = Number(cue.dataset.spot);
+  const pick = event.target.closest('[data-set]');
+  if (pick) {
+    const {set:key,value} = pick.dataset;
+    if (pick.closest('.inspector')) settings().expanded = true;
+    settings()[key] = value;
+    if (key === 'today') {
+      settings().month = 0;
+      settings().day = value;
+    }
     render(currentVersion);
-    main.querySelector(`[data-spot="${spot}"]`)?.focus({ preventScroll: true });
+    const active = [...main.querySelectorAll('[data-set]')].find(el => el.dataset.set === key && el.dataset.value === value);
+    active?.focus({preventScroll:true});
     return;
   }
   const control = event.target.closest('[data-command]');
   if (!control) return;
   const { command, id, row } = control.dataset;
   if (command === 'order') return addOrder();
-  if (command === 'assign') return assign(id);
+  if (command === 'assign') return assign(id, control.dataset.kind);
   const task = findTask(id);
   if (!task) return;
   const canEdit = editable(task, role);
@@ -526,7 +512,34 @@ main.addEventListener('click', event => {
     (command === 'close-issue' && canEdit && issue?.reply && !issue.closed)) return issueDialog(task, command, row);
 });
 
+main.addEventListener('submit', event => {
+  if (!event.target.matches('[data-search]')) return;
+  event.preventDefault();
+  settings().query = String(new FormData(event.target).get('query') || '').trim();
+  render(currentVersion);
+  main.querySelector('#lookup')?.focus({preventScroll:true});
+  toast('共找到 ' + main.querySelectorAll('.case-list li').length + ' 项');
+});
 main.addEventListener('change', event => {
+  if (event.target.matches('[data-pick]')) {
+    const key = event.target.dataset.pick;
+    if (key === 'left' || key === 'right') {
+      const id = event.target.value;
+      const pane = event.target.closest('section');
+      settings()[key] = id;
+      pane.querySelector('a').href = '?ui=' + id + '#dashboard';
+      const frame = pane.querySelector('iframe');
+      frame.title = designs[id][0] + '独立试办区';
+      frame.src = '?ui=' + id + '&trial=1#dashboard';
+      return;
+    }
+    if (event.target.closest('.inspector')) settings().expanded = true;
+    settings()[key] = event.target.value;
+    if (key === 'task') delete settings().version;
+    render(currentVersion);
+    main.querySelector('[data-pick="' + key + '"]')?.focus({preventScroll:true});
+    return;
+  }
   if (event.target.id === 'task-filter') {
     filter = event.target.value;
     location.hash = link('tasks', filter === 'all' ? '' : filter);

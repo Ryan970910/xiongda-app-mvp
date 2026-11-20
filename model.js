@@ -159,5 +159,23 @@ export function initialState() {
       { id: 'F3', projectId: 'RD-002', category: categories[1], period: `${year}-03`, voucher: '凭 0308', amount: 870000 },
     ],
   };
+  const follow = newTask(first, 'finance', localDate(-1), false, '检测凭证补件核对');
+  follow.id = first.id + '-finance-supplement';
+  log(follow, 'dispatcher', '经理派单', '', sampleTime);
+  transition({ tasks }, follow, 'finance', 'accept');
+  follow.draft.summary = '核对检测费凭证与研发试验记录。';
+  follow.draft.evidence = '检测委托清单（示例）';
+  follow.issues = [
+    {id:'sample-issue-1', question:'请补充低温检测报告的材料编号。', reply:'', closed:false},
+    {id:'sample-issue-2', question:'核对试验方案版本。', reply:'采用三月试验方案 V2（示例）。', closed:true},
+  ];
+  for (const issue of follow.issues) {
+    log(follow, 'finance', '发起补件', issue.question);
+    if (issue.closed) {
+      log(follow, 'research', '回复补件', issue.reply);
+      log(follow, 'finance', '确认关闭补件', issue.question);
+    }
+  }
+  tasks.push(follow);
   return { orders, tasks };
 }

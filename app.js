@@ -1,7 +1,8 @@
 import {
   roles, statuses, lines, categories, initialState, actionsFor, actionLabels,
-  newTask, projectsFor, editable, transition, log, localDate,
+  newTask, projectsFor, snapshotProjects, editable, transition, log, localDate,
 } from './model.js';
+import { designs, gallery, visual } from './visuals.js';
 
 const main = document.querySelector('main');
 const dialog = document.querySelector('dialog');
@@ -14,6 +15,17 @@ const navigation = {
   dashboard: ['工作台', '▦'], tasks: ['任务中心', '☷'], orders: ['客户与订单', '▤'],
   projects: ['研发项目', '◇'], archive: ['交付归档', '▣'],
 };
+let ui, currentVersion = null, spot = 0;
+const appearance = document.querySelector('#appearance');
+function syncAppearance() {
+  const requested = new URL(location.href).searchParams.get('ui');
+  ui = Object.hasOwn(designs, requested) ? requested : 'transit';
+  document.documentElement.dataset.ui = ui;
+  appearance.value = ui;
+}
+function scene(task = null, index = null) {
+  return visual(ui, { state, role, task, index, spot, esc, money: yuan, actions: actionsFor });
+}
 
 let state = initialState();
 let role = 'dispatcher';
@@ -22,7 +34,14 @@ try {
   const saved = localStorage.getItem(storageKey);
   if (saved) {
     const parsed = JSON.parse(saved);
-    if (Array.isArray(parsed.orders) && Array.isArray(parsed.tasks)) state = parsed;
+    if (Array.isArray(parsed.orders) && Array.isArray(parsed.tasks)) {
+      state = parsed;
+      for (const task of state.tasks.filter(t => t.line === 'finance')) {
+        for (const version of task.versions) {
+          if (!version.projects?.length) version.projects = structuredClone(projectsFor(state, task.orderId));
+        }
+      }
+    }
   }
 } catch {
   storageUnavailable = true;
@@ -69,7 +88,7 @@ const attrs = id => `data-id="${esc(id)}"`;
 function route() {
   const [page = '', ...parts] = location.hash.slice(1).split('/');
   try {
-    return { page: Object.hasOwn(navigation, page) ? page : 'dashboard', id: decodeURIComponent(parts.join('/')) };
+    return { page: page === 'designs' || Object.hasOwn(navigation, page) ? page : 'dashboard', id: decodeURIComponent(parts.join('/')) };
   } catch {
     return { page: 'dashboard', id: '' };
   }
@@ -121,15 +140,7 @@ function dashboard() {
     : '<p class="empty">当前角色没有待办。可切换角色继续处理其他节点。</p>';
 
   return heading('研发服务工作台', `${today} · 当前为${roles[role]}视角`, newOrderButton()) + `
-    <section class="handoff" aria-label="研发服务流程">
-      <div><span class="eyebrow">科研与财务协同</span><h2>从立项到交付归档</h2>
-        <p class="sub">两条业务线共用订单和项目编号。</p></div>
-      <div class="flow">
-        <a href="#projects"><span class="num">01</span><strong>科研立项</strong><small>确认项目清单</small></a><span aria-hidden="true">→</span>
-        <a href="#tasks/finance"><span class="num">02</span><strong>费用归集</strong><small>关联项目与凭证</small></a><span aria-hidden="true">→</span>
-        <a href="#archive"><span class="num">03</span><strong>交付归档</strong><small>留存审核与确认</small></a>
-      </div>
-    </section>
+    ${scene()}
     <div class="stats">${metrics.map(([label, number, href]) =>
       `<a class="stat" href="${href}"><span class="metric-label">${label}</span><strong class="metric">${number}</strong></a>`).join('')}</div>
     <div class="content-grid">
@@ -172,7 +183,7 @@ function ordersPage(id) {
       }), '暂无订单。'));
   }
   const tasks = state.tasks.filter(task => task.orderId === order.id);
-  const canAssign = role === 'dispatcher' && tasks.length < Object.keys(lines).length;
+  const canAssign = role === 'dispatcher';
   return heading(esc(order.title), `${esc(order.customer)} · ${esc(order.id)}`, canAssign ? button('＋ 派发任务', 'assign', attrs(order.id), 'primary') : '') +
     `<div class="stack">
       ${panel('订单信息', `<div class="panel-body"><p>客户编号 ${esc(order.code)}　·　合同编号 ${esc(order.contract)}</p>
@@ -196,8 +207,8 @@ function projectsPage() {
     `<tr><td><strong>${esc(project.name)}</strong><span class="row-meta">${esc(project.id)}</span></td>
     <td><a class="text-link" href="${link('orders', order.id)}">${esc(order.customer)}</a></td>
     <td>${esc(project.person)}</td><td>${esc(project.start)} 至 ${esc(project.end)}</td><td class="numeric">${yuan(project.budget)}</td></tr>`));
-  return heading('研发项目', '科研立项完成客户确认后，清单进入项目台账，供同一订单的财务任务引用。') +
-    panel('已确认立项清单', table(['项目编号 / 名称', '客户', '负责人', '研发周期', '预算'], rows, '暂无已确认的研发项目。'));
+  return heading('研发项目', '科研立项通过内部末级审核后，项目即同步至同一订单的财务任务。') +
+    panel('内部审核通过的立项清单', table(['项目编号 / 名称', '客户', '负责人', '研发周期', '预算'], rows, '暂无内部审核通过的研发项目。'));
 }
 
 function feeTable(task, fees, projects, controls) {
@@ -209,8 +220,10 @@ function feeTable(task, fees, projects, controls) {
   const total = yuan(fees.reduce((sum, item) => sum + item.amount, 0));
   return `${table(['研发项目', '费用类别', '期间', '凭证索引', '金额', ...(controls ? [''] : [])], rows, '暂无费用明细。')}
     <div class="panel-body"><div class="split"><span>明细合计</span><strong>${total}</strong></div>
-      ${projects.length > 1 ? `<p class="sub">${projects.map(project => `${esc(project.id)} · ${yuan(
-        fees.filter(item => item.projectId === project.id).reduce((sum, item) => sum + item.amount, 0))}`).join('　')}</p>` : ''}
+      ${projects.length ? `<p class="sub">${projects.map(project => {
+        const rows = fees.filter(item => item.projectId === project.id);
+        return `${esc(project.id)} · ${rows.length ? yuan(rows.reduce((sum, item) => sum + item.amount, 0)) : '本底稿无明细'}`;
+      }).join('　')}</p>` : ''}
     </div>`;
 }
 
@@ -233,8 +246,10 @@ function taskPage(task, versionIndex) {
   const canEdit = editable(task, role) && versionIndex === null;
   const actions = actionsFor(task, role, state);
   const research = task.line === 'research';
-  const projects = research ? [] : projectsFor(state, order.id);
   const version = versionIndex === null ? task.draft : task.versions[versionIndex] || task.draft;
+  const frozen = versionIndex !== null || !['assigned', 'working', 'revision'].includes(task.status);
+  const basis = versionIndex === null && frozen ? task.versions.at(-1) || version : version;
+  const projects = research ? [] : frozen ? snapshotProjects(state, task, basis) : projectsFor(state, order.id);
   const phaseOrder = ['assigned', task.status === 'revision' ? 'revision' : 'working',
     'lead', 'reviewer', ...(task.high ? ['director'] : []), 'customer', 'complete', 'archived'];
   const path = phaseOrder.map(phase => `<li ${phase === task.status ? 'class="current" aria-current="step"' : ''}>${statuses[phase]}</li>`).join('');
@@ -247,11 +262,11 @@ function taskPage(task, versionIndex) {
 
   return heading(esc(task.title), `<a class="text-link" href="${link('orders', order.id)}">${esc(order.customer)} · ${esc(order.id)}</a>
    　·　截止 ${esc(task.deadline)}　${statusTag(task)}`, `<div class="actions">${actionButtons}</div>`) +
-  `<ol class="milestones" aria-label="任务进度">${path}</ol>
+  `${scene(task, versionIndex)}<ol class="milestones" aria-label="任务进度">${path}</ol>
     <div class="content-grid">
       <div class="stack">
         ${panel('作业底稿', `<div class="panel-body">
-          ${!research && !projects.length ? '<p class="cue">等待科研立项完成客户确认。项目清单可用后才能登记费用及提交审核。</p>' : ''}
+          ${!research && !projects.length ? '<p class="cue">等待科研立项通过内部审核。清单同步后即可登记费用。</p>' : ''}
           ${versionIndex === null && task.status === 'revision' ? '<p class="cue">修改后将生成新的提交版本，从主管审核重新开始。</p>' : ''}
           ${locked ? '<p class="cue">客户已确认，当前交付版本已锁定。</p>' : ''}
           <p><strong>作业说明</strong></p><p class="preline">${esc(version.summary || '待填写')}</p>
@@ -259,7 +274,8 @@ function taskPage(task, versionIndex) {
           ${canEdit ? `<div class="actions">${button('编辑底稿', 'draft', id, 'small')}</div>` : ''}
         </div>`, versionControl)}
         ${research
-          ? panel('研发项目清单', projectTable(version.projects, task, canEdit), canEdit ? button('＋ 增加项目', 'project', id, 'small') : '')
+          ? panel(task.relatedProject ? '关联研发项目' : '研发项目清单', projectTable(version.projects, task, canEdit && !task.relatedProject),
+            canEdit && !task.relatedProject ? button('＋ 增加项目', 'project', id, 'small') : '')
           : panel('按项目归集费用', feeTable(task, version.fees, projects, canEdit && projects.length),
             canEdit && projects.length ? button('＋ 登记费用', 'fee', id, 'small') : '')}
         ${!research ? issuesPanel(task) : ''}
@@ -286,14 +302,18 @@ function archivePage() {
 }
 
 function render(versionIndex = null) {
+  currentVersion = versionIndex;
+  syncAppearance();
   const { page, id } = route();
-  document.querySelector('#breadcrumb').textContent = navigation[page][0];
+  main.dataset.page = page;
+  document.querySelector('#breadcrumb').textContent = navigation[page]?.[0] || '界面展廊';
   document.querySelector('#navigation').innerHTML = '<p class="nav-label">业务导航</p>' +
     Object.entries(navigation).map(([key, [label, symbol]]) => `<a class="nav-link" href="${link(key)}"
       ${key === page ? 'aria-current="page"' : ''}><span class="nav-icon" aria-hidden="true">${symbol}</span>${label}</a>`).join('');
   const task = page === 'tasks' ? findTask(id) : null;
   const views = { dashboard, tasks: task ? () => taskPage(task, versionIndex) : () => tasksPage(id),
-    orders: () => ordersPage(id), projects: projectsPage, archive: archivePage };
+    orders: () => ordersPage(id), projects: projectsPage, archive: archivePage,
+    designs: () => heading('界面展廊', '选择一套工作台开始体验。各方案共用本浏览器中的订单、底稿与办理进度。') + gallery(esc) };
   main.innerHTML = views[page]();
 }
 
@@ -352,19 +372,24 @@ function addOrder() {
 function assign(id) {
   if (role !== 'dispatcher') return;
   const order = state.orders.find(item => item.id === id);
-  const available = Object.entries(lines).filter(([line]) => !findTask(`${order.id}-${line}`));
-  if (!available.length) return;
-  showDialog('派发任务', dropdown('业务线', 'line', available) +
+  const projects = projectsFor(state, id);
+  const kinds = [['research', '科研 · 新立项'], ['finance', '财务 · 费用归集'],
+    ...projects.map(p => [`follow/${p.id}`, `科研 · 跟进项目 ${p.id}（${p.name}）`])];
+  showDialog('派发任务', dropdown('业务线与事项', 'kind', kinds) +
     input('任务截止日期', 'deadline', order.deadline, `max="${esc(order.deadline)}"`, 'date') +
     input('任务名称', 'title', '', 'maxlength="80"', 'text', true) +
     '<label class="check full"><input type="checkbox" name="high">重大事项，由总监终审</label>', '派单', get => {
-    const task = newTask(order, get('line'), get('deadline'), get('high') === 'on', get('title'));
+    const kind = get('kind');
+    const task = newTask(order, kind === 'finance' ? 'finance' : 'research', get('deadline'), get('high') === 'on', get('title'));
+    if (kind.startsWith('follow/')) {
+      const project = projects.find(p => p.id === kind.slice(7));
+      if (!project) throw new Error('请选择有效的研发项目。');
+      task.relatedProject = project.id;
+      task.draft.projects = [structuredClone(project)];
+    }
     if (!task.title || task.deadline > order.deadline) throw new Error('请填写名称，且任务截止日期须在订单期限内。');
     log(task, role, '经理派单');
-    commit(next => {
-      if (findTask(task.id, next)) throw new Error('该订单已派发此业务线的任务。');
-      next.tasks.unshift(task);
-    });
+    commit(next => next.tasks.unshift(task));
     location.hash = link('tasks', task.id);
   }, '任务将进入对应承办人的待办。');
 }
@@ -408,6 +433,8 @@ function editRow(task, type, rowId) {
       item = { id: get('id').toUpperCase(), person: get('person'), name: get('name'), start: get('start'), end: get('end'), budget: cents(get('budget')) };
       if (!item.id || !item.person || !item.name || item.start > item.end) throw new Error('请完善项目资料并检查研发周期。');
       if (task.draft.projects.some(other => other.id === item.id && other.id !== rowId)) throw new Error('该项目编号已存在于本订单。');
+      if (state.tasks.some(other => other.orderId === task.orderId && other.id !== task.id && other.line === 'research' &&
+        !other.relatedProject && other.draft.projects.some(p => p.id === item.id))) throw new Error('本订单的其他立项任务已使用此编号。');
     } else {
       item = { id: rowId || crypto.randomUUID(), projectId: get('projectId'), category: get('category'), period: get('period'),
         voucher: get('voucher'), amount: cents(get('amount')) };
@@ -442,7 +469,7 @@ function issueDialog(task, command, rowId) {
 
 function exportTask(task) {
   if (task.status !== 'archived') return;
-  const record = { demo: true, order: findOrder(task), task, projects: projectsFor(state, task.orderId) };
+  const record = { demo: true, order: findOrder(task), task, projects: snapshotProjects(state, task, task.versions.at(-1)) };
   const url = URL.createObjectURL(new Blob([JSON.stringify(record, null, 2)], { type: 'application/json' }));
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -464,6 +491,15 @@ function actionDialog(task, action) {
 }
 
 main.addEventListener('click', event => {
+  const frame = event.target.closest('[data-frame]');
+  if (frame) return render(Number(frame.dataset.frame));
+  const cue = event.target.closest('[data-spot]');
+  if (cue) {
+    spot = Number(cue.dataset.spot);
+    render(currentVersion);
+    main.querySelector(`[data-spot="${spot}"]`)?.focus({ preventScroll: true });
+    return;
+  }
   const control = event.target.closest('[data-command]');
   if (!control) return;
   const { command, id, row } = control.dataset;
@@ -499,6 +535,14 @@ main.addEventListener('change', event => {
 });
 
 selectRole.innerHTML = options(Object.entries(roles), role);
+appearance.innerHTML = options(Object.entries(designs).map(([key,[name]]) => [key,name]));
+appearance.addEventListener('change', () => {
+  const url = new URL(location.href);
+  url.searchParams.set('ui', appearance.value);
+  if (route().page === 'designs') url.hash = 'dashboard';
+  history.replaceState(null, '', url);
+  render(currentVersion);
+});
 selectRole.addEventListener('change', () => {
   role = selectRole.value;
   render();

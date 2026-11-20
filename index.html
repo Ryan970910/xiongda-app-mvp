@@ -6,6 +6,7 @@
   <meta name="description" content="使用虚构数据体验科研立项、费用归集、逐级审核与交付归档。">
   <title>科研财税协同 · 演示工作台</title>
   <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./designs.css">
   <script type="module" src="./app.js"></script>
 </head>
 <body>
@@ -19,6 +20,7 @@
     <div class="workspace">
       <header class="topbar">
         <div class="crumb"><span>研发服务</span><span aria-hidden="true">/</span><strong id="breadcrumb">工作台</strong></div>
+        <div class="visual-tools"><a href="#designs">界面展廊</a><select id="appearance" aria-label="切换视觉方案"></select></div>
         <div class="account"><label for="role">体验角色</label><select id="role"></select></div>
       </header>
       <main id="main" tabindex="-1"></main>

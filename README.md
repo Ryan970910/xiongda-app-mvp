@@ -4,6 +4,8 @@
 
 首页采用「卷宗页签」，三个页签分别打开科研立项、费用归集与交付归档。[比较工作台顶部的五种排法](https://ryan970910.github.io/xiongda-app-mvp/?header=folders#dashboard)
 
+准备试用或上线时，可以[回答几个问题，生成云环境和电子签章准备清单](https://ryan970910.github.io/xiongda-app-mvp/setup-guide/)。
+
 ## 体验流程
 
 1. 进入工作台，打开示例订单的「费用归集」任务。

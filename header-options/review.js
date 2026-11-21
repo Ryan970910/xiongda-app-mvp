@@ -38,13 +38,14 @@ function design(key, ctx, foldIndex) {
       <div class="hp-fold-detail" id="hp-fold-${i}" ${i===foldIndex?'':'hidden'}><span>${sub}</span><a href="${href}">进入${label} →</a></div></div>`).join('')}</div>`;
 }
 
-export function installHeaderReview(render) {
+export function configureDashboardHeader(render) {
   let key = new URLSearchParams(location.search).get('header');
-  if (!Object.hasOwn(options,key)) return;
   let foldIndex=0;
-  const css=document.createElement('link');
-  css.rel='stylesheet'; css.href=new URL('./review.css', import.meta.url).href;
-  document.head.append(css);
+  const renderHeader = ctx => key==='original' ? null : `<section class="hp hp-${key}" aria-label="工作台与办理入口">${design(key,ctx,foldIndex)}</section>`;
+  if (!Object.hasOwn(options,key)) {
+    key='folders';
+    return renderHeader;
+  }
   const menu=document.createElement('nav');
   menu.className='hp-review'; menu.setAttribute('aria-label','顶部方案对照');
   menu.innerHTML=`<strong>顶部对照</strong><div>${Object.entries(options).map(([id,label])=>`<a href="?header=${id}#dashboard" data-sample="${id}">${label}</a>`).join('')}</div><a class="hp-sheet-link" href="./header-options/compare.webp" target="_blank" rel="noopener">看对照图 ↗</a>`;
@@ -77,5 +78,5 @@ export function installHeaderReview(render) {
     render();
     document.querySelector('[data-fold="'+i+'"]')?.focus({preventScroll:true});
   });
-  return ctx => key==='original' ? null : `<section class="hp hp-${key}" aria-label="工作台与办理入口">${design(key,ctx,foldIndex)}</section>`;
+  return renderHeader;
 }

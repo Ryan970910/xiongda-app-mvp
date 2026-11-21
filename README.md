@@ -2,7 +2,7 @@
 
 [打开研发服务工作台](https://ryan970910.github.io/xiongda-app-mvp/) 即可使用虚构客户、订单和研发项目体验科研财税政务办理流程。访客用页面右上角的选择框切换角色，进度保存在当前浏览器。
 
-[比较工作台顶部的五种排法](https://ryan970910.github.io/xiongda-app-mvp/?header=rules#dashboard)，在原页面中切换标题、新建订单按钮和三个办理入口的组合，也可以点「原版」对照。
+首页采用「卷宗页签」，三个页签分别打开科研立项、费用归集与交付归档。[比较工作台顶部的五种排法](https://ryan970910.github.io/xiongda-app-mvp/?header=folders#dashboard)
 
 ## 体验流程
 

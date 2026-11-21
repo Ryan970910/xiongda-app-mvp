@@ -114,6 +114,7 @@ function taskTable(tasks) {
 }
 
 const newOrderButton = () => role === 'dispatcher' ? button('＋ 新建订单', 'order', '', 'primary') : '';
+let headerPreview;
 
 function dashboard() {
   const today = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
@@ -129,7 +130,7 @@ function dashboard() {
     <p>${esc(findOrder(task).customer)}</p></a></li>`).join('')}</ul>`
     : '<p class="empty">当前角色没有待办。可切换角色继续处理其他节点。</p>';
 
-  return heading('研发服务工作台', `${today} · 当前为${roles[role]}视角`, newOrderButton()) + `
+  const originalHeader = heading('研发服务工作台', `${today} · 当前为${roles[role]}视角`, newOrderButton()) + `
     <section class="handoff" aria-label="研发服务流程">
       <div><span class="eyebrow">科研与财务协同</span><h2>从立项到交付归档</h2>
         <p class="sub">两条业务线共用订单和项目编号。</p></div>
@@ -138,7 +139,9 @@ function dashboard() {
         <a href="#tasks/finance"><span class="num">02</span><strong>费用归集</strong><small>关联项目与凭证</small></a><span aria-hidden="true">→</span>
         <a href="#archive"><span class="num">03</span><strong>交付归档</strong><small>留存审核与确认</small></a>
       </div>
-    </section>
+    </section>`;
+  const header = headerPreview?.({ today, roleName: roles[role], orderButton: newOrderButton() }) ?? originalHeader;
+  return header + `
     <div class="stats">${metrics.map(([label, number, href]) =>
       `<a class="stat" href="${href}"><span class="metric-label">${label}</span><strong class="metric">${number}</strong></a>`).join('')}</div>
     <div class="content-grid">
@@ -545,5 +548,9 @@ document.querySelector('.skip').addEventListener('click', event => {
   event.preventDefault();
   main.focus();
 });
+if (new URLSearchParams(location.search).has('header')) {
+  const { installHeaderReview } = await import('./header-options/review.js');
+  headerPreview = installHeaderReview(render);
+}
 render();
 if (storageUnavailable) toast('浏览器存储不可用，当前展示初始演示数据。');

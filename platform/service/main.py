@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.exc import StaleDataError
 
-from . import auth, workflow
+from . import auth, workflow, materials, finance, operations, local, imports, books, configuration
 from .db import Audit, Base, Department, Session, engine
 
 def initialize():
@@ -24,6 +24,13 @@ async def startup(app):
 
 app=FastAPI(title="科研财税协同内部服务",version="1.0.0",lifespan=startup,docs_url="/api/docs",redoc_url=None,openapi_url="/api/openapi.json")
 app.include_router(auth.router,prefix="/api/v1")
+app.include_router(local.router,prefix="/api/v1")
+app.include_router(materials.router,prefix="/api/v1")
+app.include_router(finance.router,prefix="/api/v1")
+app.include_router(imports.router,prefix="/api/v1")
+app.include_router(books.router,prefix="/api/v1")
+app.include_router(configuration.router,prefix="/api/v1")
+app.include_router(operations.router,prefix="/api/v1")
 app.include_router(workflow.router,prefix="/api/v1")
 
 def problem(status,message):
@@ -69,3 +76,5 @@ def health():
 def mount_frontend():
     dist=Path(__file__).resolve().parents[1]/"web"/"dist"
     if dist.is_dir():app.mount("/",StaticFiles(directory=dist,html=True),name="www")
+
+mount_frontend()

@@ -146,6 +146,7 @@ def session_user(db,p):
     u=db.get(User,int(p["sub"]))
     if not u or not u.enabled or not s or s.user_id!=u.id or s.expires<=now() or now()-s.last_seen>timedelta(minutes=30):
         fail(401,"会话过期，请重新登录")
+    if os.getenv("OFFICE_MODE")=="1" and u.employee_no.startswith("LOCAL-"):fail(403,"请使用本人办公室测试账号")
     return s,u
 
 def authenticate(request:Request, db:DB, token:Annotated[HTTPAuthorizationCredentials|None,Depends(bearer)]):
@@ -174,6 +175,9 @@ def login(form:Login,request:Request,db:DB):
     u=db.scalar(select(User).where(User.username==login_name).with_for_update())
     valid=matches(form.password,u.password_hash if u else DUMMY)
     locked=u and u.locked_until and u.locked_until>now()
+    if u and os.getenv("OFFICE_MODE")=="1" and u.employee_no.startswith("LOCAL-"):
+        record(db,request,u,"login.denied",login_name)
+        db.commit();fail(401,"请使用管理员为本人开设的办公室测试账号")
     if not u or not u.enabled or locked or not valid:
         if u and u.enabled and not locked:
             if u.locked_until:

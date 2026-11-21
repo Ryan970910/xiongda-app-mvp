@@ -5,6 +5,8 @@ import os
 import secrets
 import tempfile
 import zipfile
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote
 
@@ -16,9 +18,10 @@ from docx.oxml.ns import qn
 from sqlalchemy import select
 
 from .auth import Actor, DB, Form, fail, ok, record
+from .configuration import catalog
 from .db import DATA, Department, Entry, FileObject, History, Member, Order, Project, Task
 from .workflow import (business_snapshot, checked_revision, file_info, object_info, projects_query,
-                       require_writer, visible_task)
+                       require_writer, visible_task, working_digest)
 from pydantic import Field
 from typing import Literal
 
@@ -75,14 +78,7 @@ def read_blob(f):
 def deliver(data,name,media):
     return Response(data,media_type=media,headers={"Content-Disposition":"attachment; filename*=UTF-8''"+quote(name,safe=""),"Cache-Control":"no-store"})
 
-@router.post("/materials/upload")
-def upload(request:Request,db:DB,u:Actor,task:int=FieldValue(...),category:str=FieldValue(...,min_length=1,max_length=64),
-           file:UploadFile=File(...),project:int|None=FieldValue(None),previous:int|None=FieldValue(None)):
-    t=visible_task(db,u,task,True);require_writer(db,u,t);project_for(db,t,project)
-    if project is None and t.kind!="立项":fail(422,"请选择材料对应的项目")
-    if previous:
-        old=db.get(FileObject,previous)
-        if not old or old.task!=task or old.project!=project or old.category!=category:fail(422,"上一版本不属于此材料")
+def accept_blob(file):
     name=(file.filename or "").replace("\\","/").split("/")[-1].strip()
     ext=Path(name).suffix.lower()
     if not name or len(name)>150 or any(ord(c)<32 for c in name) or ext not in FORMATS:fail(422,"支持 PDF、PNG、JPEG、DOCX、XLSX")
@@ -98,8 +94,19 @@ def upload(request:Request,db:DB,u:Actor,task:int=FieldValue(...),category:str=F
         stream.seek(0)
         if not office_valid(stream,ext):fail(422,"Office 文件结构无效")
         store_blob(key,stream)
+    return name,key,hashed.hexdigest(),size
+
+@router.post("/materials/upload")
+def upload(request:Request,db:DB,u:Actor,task:int=FieldValue(...),category:str=FieldValue(...,min_length=1,max_length=64),
+           file:UploadFile=File(...),project:int|None=FieldValue(None),previous:int|None=FieldValue(None)):
+    t=visible_task(db,u,task,True);require_writer(db,u,t);project_for(db,t,project)
+    if project is None and t.kind!="立项":fail(422,"请选择材料对应的项目")
+    if previous:
+        old=db.get(FileObject,previous)
+        if not old or old.task!=task or old.project!=project or old.category!=category:fail(422,"上一版本不属于此材料")
+    name,key,digest,size=accept_blob(file)
     try:
-        f=FileObject(task=task,project=project,category=category,name=name,storage=key,digest=hashed.hexdigest(),size=size,previous=previous,actor=u.id)
+        f=FileObject(task=task,project=project,category=category,name=name,storage=key,digest=digest,size=size,previous=previous,actor=u.id)
         db.add(f);t.revision+=1;db.flush()
         record(db,request,u,"file.upload",f.id,{"sha256":f.digest,"bytes":size})
         db.commit()
@@ -131,17 +138,17 @@ class DocumentForm(Form):
     revision:int|None=Field(default=None,gt=0)
 
 @router.get("/templates")
-def templates(u:Actor):
-    return ok(CATALOG)
+def templates(db:DB,u:Actor):
+    return ok(list(catalog(db).values()))
 
 @router.get("/templates/{category}")
-def category_templates(category:str,u:Actor):
-    return ok([t for t in CATALOG if t["category"]==category])
+def category_templates(category:str,db:DB,u:Actor):
+    return ok([t for t in catalog(db).values() if t["category"]==category])
 
 def save_document(form,request,db,u,entry=None):
     t=visible_task(db,u,form.task,True);require_writer(db,u,t);project_for(db,t,form.project)
     if entry and (entry.task!=t.id or entry.kind!="document"):fail(404,"文书不存在")
-    template=TEMPLATES.get(form.template)
+    template=catalog(db).get(form.template)
     if not template:fail(422,"模板不存在")
     if set(form.values)!=set(template["fields"]) or any(not s.strip() or len(s)>10000 for s in form.values.values()):
         fail(422,"请完整填写所选模板的各个栏目")
@@ -150,10 +157,21 @@ def save_document(form,request,db,u,entry=None):
     else:
         entry=Entry(task=t.id,kind="document",key=secrets.token_hex(10),actor=u.id)
     entry.project=form.project
-    entry.payload=form.model_dump(exclude={"task","project","revision"})
+    entry.payload={**form.model_dump(exclude={"task","project","revision"}),"layout":template}
     db.add(entry);t.revision+=1;db.flush()
     record(db,request,u,"document.save",entry.id,{"template":form.template,"revision":entry.revision})
     db.commit();return ok(object_info(entry))
+
+def issue_documents(db,task):
+    rows=db.scalars(select(Entry).where(Entry.task==task.id,Entry.kind=="document"))
+    for doc in rows:
+        if (doc.payload.get("layout") or TEMPLATES[doc.payload["template"]])["category"]!="resolution":continue
+        issue=Entry(task=task.id,kind="issuance",key=f"{doc.id}/{task.version}",actor=doc.actor,state="approved",payload={})
+        db.add(issue);db.flush()
+        projects=task.draft.get("projects",[])
+        data={"number":f"研服〔{date.today().year}〕{issue.id}号","projects":projects,
+              "budget":str(sum((Decimal(p["budget"]) for p in projects),Decimal(0))),"date":str(date.today())}
+        issue.payload=data;doc.payload={**doc.payload,"issuance":data}
 
 @router.post("/documents")
 def create_document(form:DocumentForm,request:Request,db:DB,u:Actor):
@@ -166,7 +184,7 @@ def edit_document(eid:int,form:DocumentForm,request:Request,db:DB,u:Actor):
     return save_document(form,request,db,u,entry)
 
 def word_bytes(payload,record_no):
-    t=TEMPLATES[payload["template"]]
+    t=payload.get("layout") or TEMPLATES[payload["template"]]
     d=Document();section=d.sections[0]
     section.page_width=Cm(21);section.page_height=Cm(29.7)
     section.top_margin=Cm(3.7);section.left_margin=Cm(2.8);section.right_margin=Cm(2.6)
@@ -174,11 +192,23 @@ def word_bytes(payload,record_no):
     if t["category"]=="resolution":
         p=d.add_paragraph();p.alignment=1
         r=p.add_run(payload["values"].get("发文单位","")+"文件");r.font.color.rgb=RGBColor(200,0,0);r.bold=True;r.font.size=Pt(28)
+    issue=payload.get("issuance",{})
+    if issue:d.add_paragraph(issue["number"]).alignment=1
     p=d.add_paragraph();p.alignment=1;p.add_run(payload["title"]).bold=True
     d.add_paragraph(record_no+"　·　"+t["name"])
     for key in t["fields"]:
         p=d.add_paragraph();p.add_run(key).bold=True
-        d.add_paragraph(payload["values"][key])
+        value=payload["values"][key]
+        if issue and key=="年度预算合计":value=issue["budget"]+" 元"
+        if issue and key=="项目清单":value="详见附件《年度立项科研项目清单》"
+        d.add_paragraph(value)
+    if issue:
+        d.add_page_break();d.add_heading("附件　年度立项科研项目清单",1)
+        table=d.add_table(rows=0,cols=5);table.style="Table Grid"
+        for row in [["项目编号","项目名称","负责人","实施周期","预算（元）"]]+[
+            [p["code"],p["name"],p["leader"],p["start"]+" 至 "+p["end"],p["budget"]] for p in issue["projects"]]:
+            for cell,value in zip(table.add_row().cells,row):cell.text=str(value)
+        d.add_paragraph("预算合计　"+issue["budget"]+" 元")
     stream=io.BytesIO();d.save(stream);return stream.getvalue()
 
 @router.get("/documents/{eid}/word")
@@ -221,11 +251,15 @@ def issue_action(eid:int,action:Literal["reply","close"],form:Comment,request:Re
 @router.post("/tasks/{tid}/joint-sign")
 def cosign(tid:int,form:Comment,request:Request,db:DB,u:Actor):
     t=visible_task(db,u,tid,True);require_writer(db,u,t)
-    if t.kind!="结题":fail(409,"仅限结题任务")
+    if t.kind!="结题" and t.line!="finance":fail(409,"仅限财务资料联审或结题联签")
     line=db.get(Department,u.department).line
     if line not in {"research","finance"}:fail(403,"仅业务线可联签")
-    e=Entry(task=tid,kind="cosign",key=line,state="signed",payload={"opinion":form.note},actor=u.id)
-    db.add(e);t.revision+=1;record(db,request,u,"joint-sign."+line,tid);db.commit();return ok()
+    digest=working_digest(db,t)
+    e=db.scalar(select(Entry).where(Entry.task==tid,Entry.kind=="cosign",Entry.key==line))
+    if e and e.payload.get("digest")==digest:fail(409,"本线已确认当前内容")
+    if not e:e=Entry(task=tid,kind="cosign",key=line,state="signed")
+    e.actor=u.id;e.payload={"opinion":form.note,"digest":digest}
+    db.add(e);t.revision+=1;record(db,request,u,"joint-sign."+line,tid,e.payload);db.commit();return ok()
 
 @router.get("/tasks/{tid}/archive.zip")
 def archive(tid:int,request:Request,db:DB,u:Actor):

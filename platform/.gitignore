@@ -5,3 +5,7 @@ runtime/
 web/node_modules/
 web/dist/
 .pytest_cache/
+办公室配置.json
+*.key
+*.pem
+*.pfx

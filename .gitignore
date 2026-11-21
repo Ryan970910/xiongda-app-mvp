@@ -1,4 +1,5 @@
 *.docx
 .local/
+本机交付/
 docs/AI-HANDOFF.md
 docs/MVP-DESIGN.md

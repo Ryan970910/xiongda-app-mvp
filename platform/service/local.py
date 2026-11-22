@@ -24,20 +24,28 @@ class Setup(Form):
 
 @router.get("/local/status")
 def status(db:DB):
-    local=bool(os.getenv("ACCEPTANCE_TICKET"))
+    shared=os.getenv("RD_SHARED_TRIAL")=="1"
+    local=bool(os.getenv("ACCEPTANCE_TICKET")) and not shared
     return ok({"setup":local and not db.scalar(select(User.id).limit(1)),
+               "shared":shared,
                "accounts":[{"username":n,"name":label} for n,label,_,_ in ACCOUNTS] if local else []})
 
 @router.post("/local/setup")
 def setup(form:Setup,request:Request,db:DB):
     ticket=os.getenv("ACCEPTANCE_TICKET","")
-    if not ticket or not secrets.compare_digest(ticket,form.ticket) or request.client.host not in {"127.0.0.1","::1"}:fail(403,"请从本机启动窗口打开首次设置链接")
+    if os.getenv("RD_SHARED_TRIAL")=="1" or not ticket or not secrets.compare_digest(ticket,form.ticket) or request.client.host not in {"127.0.0.1","::1"}:fail(403,"请从本机启动窗口打开首次设置链接")
     if db.scalar(select(User.id).limit(1)):fail(409,"此工作台已完成初始化")
+    people=seed_example(db,{name:form.password for name,_,_,_ in ACCOUNTS},shared=False)
+    record(db,request,people["dispatch"],"local.initialize","fictional-workspace")
+    db.commit();return ok()
+
+def seed_example(db,passwords,*,shared):
     deps={d.line:d for d in db.scalars(select(Department))};people={}
+    prefix="TRIAL-" if shared else "LOCAL-"
     for n,label,line,role in ACCOUNTS:
-        u=User(username=n,employee_no="LOCAL-"+n,name=label,department=deps[line].id,team="验收一组",
+        u=User(username=n,employee_no=prefix+n,name=label,department=deps[line].id,team="验收一组",
                roles=[{"role":role,"expires":None}],enabled=True)
-        set_password(u,form.password,False);db.add(u);people[n]=u
+        set_password(u,passwords[n],shared);db.add(u);people[n]=u
     db.flush()
     manager=people["dispatch"];today=date.today();end=today+timedelta(days=90)
     c=Customer(name="青禾试验科技（虚构）",code="DEMO00000000000001",department=manager.department,manager=manager.id,details={"level":"一般","industry":"制造业"})
@@ -54,13 +62,12 @@ def setup(form:Setup,request:Request,db:DB):
         t=Task(order_id=o.id,customer=c.id,title=title,line=line,kind=kind,owner=owner.id,dispatcher=manager.id,
             department=owner.department,team=owner.team,deadline=str(end),brief="请根据虚构试验资料办理，并保留审核意见。")
         db.add(t);db.flush()
-        db.add(History(task=t.id,actor=manager.id,action="assign",version=0,note="本机验收案例派单"))
+        db.add(History(task=t.id,actor=manager.id,action="assign",version=0,note="虚构验收案例派单"))
         if line=="finance":db.add(Member(task=t.id,user=people["research"].id))
-    record(db,request,manager,"local.initialize","fictional-workspace")
     from .operations import Policy
     for title,reference,clause,when,text,url in [
         ("年度其他费用限额","税务总局公告2021年第28号","第三条","2021-01-01","年度内统算其他相关费用的允许金额，资本化项目在形成无形资产年度参与计算。","https://www.chinatax.gov.cn/chinatax/n810351/n810906/c5169537/content.html"),
         ("委托境外研发","财税〔2018〕64号","第一条","2018-01-01","境外机构委托研发按实际费用的八成计入，并适用境内符合条件研发费用三分之二的限额。","https://fgk.chinatax.gov.cn/zcfgk/c102416/c5202434/content.html"),
         ("研发费用纳税申报核对","税务总局公告2025年第1号","A107012","2025-01-01","年度复核时检查费用化与资本化、无形资产摊销、收入抵减及产品材料跨年度结转。","https://12366.chinatax.gov.cn/bzds/037/037.html")]:
         db.add(Policy(actor=people["admin"].id,payload={"title":title,"reference":reference,"clause":clause,"effective":when,"text":text,"link":url,"level":"国家","version":"内置验收参考"}))
-    db.commit();return ok()
+    return people

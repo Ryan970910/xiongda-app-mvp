@@ -9,7 +9,7 @@ import {useWorkspace,type Row} from './store'
 import {shown,statusName,today,keyLabel} from './forms'
 const api=useWorkspace(),router=useRouter(),route=useRoute()
 const user=ref<Row|null>(null),startup=ref(true),needsSetup=ref(false),accounts=ref<Row[]>([]),schemas=ref<Row>({})
-const username=ref('research'),password=ref(''),again=ref(''),ticket=ref(''),error=ref(''),busy=ref(false)
+const shared=ref(false),username=ref('research'),password=ref(''),again=ref(''),ticket=ref(''),error=ref(''),busy=ref(false)
 const data=ref<Record<string,Row[]>>({}),detail=ref<Row|null>(null),client=ref<Row|null>(null),receipts=ref<Row[]>([])
 const report=ref<Row|null>(null),snapshot=ref<Row|null>(null),filter=ref(''),statusFilter=ref(''),board=ref(false),tab=ref('办理')
 const popup=ref<HTMLDialogElement>(),modal=ref<Row|null>(null),form=ref<Row>({}),formError=ref(''),dirty=ref(false)
@@ -59,7 +59,7 @@ async function load(){
 }
 watch(()=>[route.path,finTab.value,sysTab.value],()=>{filter.value='';statusFilter.value='';tab.value='办理';snapshot.value=null;report.value=null;load()})
 function go(p:string){router.push(p.startsWith('/')?p:'/'+p)}
-async function boot(){try{const [x,s]=await Promise.all([api.send('/local/status'),fetch('/api/openapi.json').then(r=>r.json())]);accounts.value=x.accounts;if(!x.accounts.length)username.value='';needsSetup.value=x.setup;schemas.value=s.components.schemas
+async function boot(){try{const [x,s]=await Promise.all([api.send('/local/status'),fetch('/api/openapi.json').then(r=>r.json())]);shared.value=!!x.shared;accounts.value=x.accounts;if(!x.accounts.length)username.value='';needsSetup.value=x.setup;schemas.value=s.components.schemas
    const fragment=location.hash.replace(/^#\/?/,'').split('/');if(fragment[0]==='first'){ticket.value=fragment[1]||'';await router.replace('/dashboard')}
    if(api.get())user.value=await api.send('/auth/me')
    await load()
@@ -117,12 +117,12 @@ async function configureRouting(){try{const rules=await api.send('/system/routin
 const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'})
 </script>
 <template>
-<div v-if="startup" class="empty">正在打开本机工作台…</div>
+<div v-if="startup" class="empty">正在打开工作台…</div>
 <main v-else-if="!user||user.must_change||user.password_due" class="login-wrap">
   <form class="login-paper" @submit.prevent="auth">
     <div class="brand-line"><span class="brand-mark"><i></i><i></i><i></i></span> 科研财税协同</div>
     <h1>{{needsSetup?'开启本机验收':user?'更新登录密码':'登录研发服务工作台'}}</h1>
-    <p class="sub">{{needsSetup?'为本机虚构案例的各岗位设置一个验收密码。之后可用同一个密码，分别体验派单、承办和审核。':user?'输入当前密码，再设置一个含字母和数字的新密码。':accounts.length?'选择一个岗位登录，各岗位共同办理本机保存的订单。':'输入管理员分配给你的个人账号和密码。'}}</p>
+    <p class="sub">{{needsSetup?'为本机虚构案例的各岗位设置一个验收密码。之后可用同一个密码，分别体验派单、承办和审核。':user?'输入当前密码，再设置一个含字母和数字的新密码。':shared?'用分配给你的账号登录，与同事共同办理虚构订单。首次登录需要改密。':accounts.length?'选择一个岗位登录，各岗位共同办理本机保存的订单。':'输入管理员分配给你的个人账号和密码。'}}</p>
     <label v-if="!needsSetup&&!user">账号<input v-model="username" list="account-list" autocomplete="username" required><datalist id="account-list"><option v-for="a in accounts" :value="a.username">{{a.name}}</option></datalist></label>
     <label v-if="!needsSetup&&!user&&accounts.length">选择验收岗位<select v-model="username"><option v-for="a in accounts" :value="a.username">{{a.name}} · {{a.username}}</option></select></label>
     <label>{{needsSetup?'设置验收密码':user?'当前密码':'密码'}}<input type="password" v-model="password" required :autocomplete="needsSetup?'new-password':'current-password'"></label>
@@ -134,7 +134,7 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <div v-else class="shell">
 <aside class="sidebar" aria-label="主导航"><a class="brand" href="#/dashboard"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>科研财税协同<small>研发服务工作台</small></span></a>
 <nav id="navigation"><a v-for="[p,text,icon] in nav" :href="'#/'+p" :class="{active:page===p}" :aria-current="page===p?'page':undefined"><span aria-hidden="true">{{icon}}</span>{{text}}</a></nav>
-<div class="sandbox"><span></span><div><strong>本机验收环境</strong><small>本机保存 · 虚构案例</small></div></div></aside>
+<div class="sandbox"><span></span><div><strong>{{shared?'多人试办环境':'本机验收环境'}}</strong><small>{{shared?'共同办理 · 虚构案例':'本机保存 · 虚构案例'}}</small></div></div></aside>
 <div class="workspace"><header class="topbar"><div class="crumb">研发服务　/　<strong>{{title}}</strong></div><div class="account"><strong>{{user.name}}</strong><button class="text-link" @click="logout">退出</button></div></header>
 <main id="main">
 <div v-if="loadError" role="alert" class="panel panel-body error">{{loadError}} <button class="button" @click="load">重新加载</button></div>
@@ -143,7 +143,7 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <nav class="hp-steps" aria-label="研发服务流程"><a v-for="([name,sub,path],i) in [['科研立项','确认项目清单','projects'],['费用归集','关联项目与凭证','tasks/finance'],['交付归档','留存审核与确认','archive']]" :href="'#/'+path"><span class="hp-no">0{{i+1}}</span><span class="hp-copy"><strong>{{name}}</strong><small>{{sub}}</small></span><span class="hp-end">↗</span></a></nav></section>
 <div class="stats"><a v-for="[name,count,path] in flags" class="stat" :href="'#'+path"><span class="metric-label">{{name}}</span><strong class="metric">{{count}}</strong></a></div>
 <div class="content-grid"><section class="panel"><div class="panel-head"><h2>近期任务</h2><a href="#/tasks" class="text-link">全部任务 →</a></div><Grid :rows="tasks.slice(0,6)" :cols="cols.tasks"><template #default="{row}"><a :href="'#/tasks/'+row.id" class="text-link">查看 →</a></template></Grid></section>
-<aside class="stack"><section class="panel"><div class="panel-head"><h2>我的待办</h2></div><ul class="queue" v-if="tasks.some(mine)"><li v-for="r in tasks.filter(mine).slice(0,5)"><a :href="'#/tasks/'+r.id"><strong>{{r.title}}</strong><p>{{statusName(r.status)}}</p></a></li></ul><p v-else class="empty">当前岗位没有待办。</p></section><section class="panel"><div class="panel-head"><h2>{{accounts.length?'本机验收指引':'办公室共同试办'}}</h2></div><p v-if="!accounts.length" class="panel-body">请以本人账号办理。承办同事接件后，派单同事刷新任务即可看到进度。</p><p v-else class="panel-body">先用科研承办账号打开青禾立项任务。填好项目清单，依次交给科研主管、科研复审经理审核，再用财务承办账号引用同一项目。</p></section></aside></div>
+<aside class="stack"><section class="panel"><div class="panel-head"><h2>我的待办</h2></div><ul class="queue" v-if="tasks.some(mine)"><li v-for="r in tasks.filter(mine).slice(0,5)"><a :href="'#/tasks/'+r.id"><strong>{{r.title}}</strong><p>{{statusName(r.status)}}</p></a></li></ul><p v-else class="empty">当前岗位没有待办。</p></section><section class="panel"><div class="panel-head"><h2>{{shared?'多人试办指引':accounts.length?'本机验收指引':'办公室共同试办'}}</h2></div><p v-if="!accounts.length" class="panel-body">请以本人账号办理。承办同事接件后，派单同事刷新任务即可看到进度。</p><p v-else class="panel-body">先用科研承办账号打开青禾立项任务。填好项目清单，依次交给科研主管、科研复审经理审核，再用财务承办账号引用同一项目。</p></section></aside></div>
 </template>
 <template v-else-if="page==='tasks'&&id&&t"><div class="page-head"><div><a href="#/tasks" class="text-link">← 任务中心</a><h1>{{t.title}}</h1><p class="sub">{{t.kind}} · {{statusName(t.status)}} · 主办 {{who(t.owner)}} · 截止 {{t.deadline}}</p></div></div>
 <div class="toolbar tabs"><button v-for="v in ['办理','文书与材料','协作与记录','审核时间线']" :class="['button',tab===v?'primary':'']" @click="tab=v">{{v}}</button></div>

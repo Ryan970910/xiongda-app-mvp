@@ -72,6 +72,11 @@ class Audit(Base):
     ip = Column(String(64), nullable=False)
     agent = Column(String(240), nullable=False)
 
+class SessionPost(Base):
+    __tablename__ = "sys_session_post"
+    session_id = Column(String(64),ForeignKey("sys_session.id",ondelete="CASCADE"),primary_key=True)
+    department = Column(ID,ForeignKey("sys_dept.id"),nullable=False)
+
 class Customer(Base):
     __tablename__ = "biz_customer"
     id = Column(ID, primary_key=True)

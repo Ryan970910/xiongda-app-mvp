@@ -40,11 +40,29 @@ class Attendance(WorkBase):
     hours:Positive
     salary:Money
     insurance:Money
+    scheduled_hours:Money|None=None
+    leave_hours:Money=Decimal(0)
+    absence_hours:Money=Decimal(0)
+    overtime_hours:Money=Decimal(0)
+    pension:Money|None=None
+    medical:Money|None=None
+    unemployment:Money|None=None
+    injury:Money|None=None
+    maternity:Money|None=None
+    housing:Money|None=None
     external:Money=Decimal(0)
     agreement:str=Field(default="",max_length=100)
     voucher:str=Field(min_length=1,max_length=100)
     direct:bool=True
     tech:bool=True
+    @model_validator(mode="after")
+    def reconcile(self):
+        if self.scheduled_hours is not None and self.scheduled_hours+self.overtime_hours-self.leave_hours-self.absence_hours!=self.hours:
+            raise ValueError("应出勤加加班、减休假与缺勤，须等于实到工时")
+        parts=[self.pension,self.medical,self.unemployment,self.injury,self.maternity,self.housing]
+        if any(v is not None for v in parts) and (None in parts or sum(parts)!=self.insurance):
+            raise ValueError("五险一金分项须全部填报且合计与总额一致")
+        return self
 
 class Hours(WorkBase):
     person:str=Field(min_length=1,max_length=64)
@@ -68,6 +86,9 @@ class Pick(WorkBase):
     project:int=Field(gt=0)
     trial:int=Field(gt=0)
     material:str=Field(min_length=1,max_length=100)
+    material_code:str=Field(default="",max_length=64)
+    specification:str=Field(default="",max_length=100)
+    requested:Positive|None=None
     batch:str=Field(min_length=1,max_length=80)
     unit:str=Field(min_length=1,max_length=30)
     qty:Positive
@@ -76,8 +97,13 @@ class Pick(WorkBase):
     day:date
     @model_validator(mode="after")
     def available(self):
+        if self.requested is not None and self.qty>self.requested:raise ValueError("实发数不可超过请领数")
         if self.qty>self.stock:raise ValueError("领料数量超过登记的可用库存")
         return self
+
+class MaterialShare(Form):
+    project:int=Field(gt=0)
+    weight:Positive
 
 class Flow(WorkBase):
     pick:int=Field(gt=0)
@@ -86,12 +112,15 @@ class Flow(WorkBase):
     location:str=Field(min_length=1,max_length=128)
     day:date
     income:Money=Decimal(0)
+    shares:list[MaterialShare]=Field(default_factory=list,max_length=100)
+    basis:str=Field(default="",max_length=300)
 
 class Fee(WorkBase):
     project:int=Field(gt=0)
     day:date
     voucher:str=Field(min_length=1,max_length=100)
     subject:str=Field(min_length=1,max_length=80)
+    voucher_type:str=Field(default="",max_length=32)
     category:Literal["人员人工","直接投入","折旧","无形资产摊销","设计试验","其他相关","境内委托","境外机构委托","境外个人委托"]
     amount:Money
     treatment:Literal["费用化","资本化"]="费用化"
@@ -168,12 +197,23 @@ def review_trial(form:Review,request:Request,db:DB,u:Actor):return review_entry(
 
 @router.post("/picks")
 def pick(form:Pick,request:Request,db:DB,u:Actor):
-    t=business_task(db,u,form.task);p=project_for(db,t,form.project)
+    t=business_task(db,u,form.task)
+    return finish(db,u,request,save_pick(form,db,u,t))
+
+def save_pick(form,db,u,t):
+    p=project_for(db,t,form.project)
     trial=db.get(Entry,form.trial)
     if not trial or trial.kind!="trial" or trial.task!=t.id or trial.project!=p.id or trial.state!="approved":
         fail(422,"须关联本项目审核通过的试制申请")
     if form.qty*form.price>p.budget:fail(422,"本次领料金额超过项目预算")
-    return finish(db,u,request,save(db,u,t,"pick",form,p.id,"issued"))
+    db.scalar(select(Project.id).where(Project.id==p.id).with_for_update())
+    issued=list(db.scalars(select(Entry).where(Entry.project==p.id,Entry.kind=="pick")))
+    returns=defaultdict(Decimal)
+    for move in db.scalars(select(Entry).where(Entry.project==p.id,Entry.kind=="flow")):
+        if move.payload["destination"]=="return":returns[move.payload["pick"]]+=amounts(move,"qty")
+    occupied=sum((amounts(old,"qty")-returns[old.id])*amounts(old,"price") for old in issued)
+    if occupied+form.qty*form.price>p.budget:fail(422,"累计领料扣除退料后超过项目预算")
+    return save(db,u,t,"pick",form,p.id,"issued")
 
 def pick_balance(db,pick):
     rows=db.scalars(select(Entry).where(Entry.task==pick.task,Entry.kind=="flow"))
@@ -185,19 +225,30 @@ def pick_balance(db,pick):
 @router.post("/flows")
 def flow(form:Flow,request:Request,db:DB,u:Actor):
     t=business_task(db,u,form.task)
+    return finish(db,u,request,save_flow(form,db,u,t))
+
+def save_flow(form,db,u,t):
     p=db.get(Entry,form.pick)
     if not p or p.kind!="pick" or p.task!=t.id:fail(422,"请关联本任务原领料单")
     if form.day.isoformat()<p.payload["day"] or form.qty>pick_balance(db,p)[0]:fail(422,"流转日期或数量不符")
     if form.income and form.destination!="disposal":fail(422,"处置收入须关联处置记录")
+    weights={s.project:s.weight for s in form.shares}
+    if form.shares and (form.destination!="consume" or not form.basis or len(weights)!=len(form.shares)):
+        fail(422,"共料分摊须为实际消耗、选不同项目并填写分摊依据")
+    for pid in weights:project_for(db,t,pid)
     e=save(db,u,t,"flow",form,p.project,"posted")
-    project=db.get(Project,p.project)
     if form.destination=="consume" or form.income:
-        fee=Fee(task=t.id,key=f"MAT/{e.id}",project=p.project,day=form.day,voucher=form.key,subject="研发材料",
-                category="直接投入",amount=cent(form.qty*amounts(p,"price")) if form.destination=="consume" else form.income,
-                note=p.payload["material"]+" · "+form.location,type="一般" if form.destination=="consume" else "特殊收入",
-                basis="领料单 "+p.key,tax_line=8,treatment=project.details["treatment"])
-        save(db,u,t,"fee",fee,p.project,"posted")
-    return finish(db,u,request,e)
+        total=cent(form.qty*amounts(p,"price")) if form.destination=="consume" else form.income
+        shares=distribute(total,weights or {p.project:1})
+        for pid,amount in shares.items():
+            project=db.get(Project,pid)
+            fee=Fee(task=t.id,key=f"MAT/{e.id}/{pid}",project=pid,day=form.day,voucher=form.key,subject="研发材料",
+                    category="直接投入",amount=amount,note=p.payload["material"]+" · "+form.location,
+                    type=("共用" if weights else "一般") if form.destination=="consume" else "特殊收入",
+                    basis=form.basis or "领料单 "+p.key,tax_line=8,treatment=project.details["treatment"])
+            save(db,u,t,"fee",fee,pid,"posted")
+        e.payload={**e.payload,"allocations":{str(k):str(v) for k,v in shares.items()}}
+    return e
 
 @router.get("/material-ledger")
 def material_ledger(db:DB,u:Actor):
@@ -246,11 +297,14 @@ def list_kind(kind):
 for route,kind in [("attendance","attendance"),("workhours","hours"),("trials","trial"),("picks","pick"),("flows","flow"),("fee-collections","fee")]:
     router.add_api_route("/"+route,list_kind(kind),methods=["GET"],name="list_"+kind)
 
-def write_xlsx(sheets):
+def write_xlsx(sheets,layout="横向"):
     book=Workbook();book.remove(book.active)
     from openpyxl.styles import Font,PatternFill
     for title,rows in sheets:
         ws=book.create_sheet(title[:31])
+        ws.page_setup.orientation="landscape" if layout=="横向" else "portrait"
+        ws.page_setup.paperSize=ws.PAPERSIZE_A4;ws.sheet_properties.pageSetUpPr.fitToPage=True
+        ws.page_setup.fitToWidth=1;ws.page_setup.fitToHeight=0;ws.print_title_rows="1:1"
         widths={}
         for number,row in enumerate(rows,1):
             ws.append(list(row))

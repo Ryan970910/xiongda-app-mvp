@@ -12,23 +12,26 @@ from sqlalchemy import select
 
 from .auth import Actor,DB,fail,ok,record
 from .db import Entry
-from .finance import Attendance,Fee,Hours,amounts,business_task,save,write_xlsx
+from .finance import Attendance,Fee,Flow,Hours,Pick,amounts,business_task,save_pick,save_flow,write_xlsx
 from .materials import deliver,project_for
 
 router=APIRouter()
-MODELS={"fees":("fee",Fee),"attendance":("attendance",Attendance),"hours":("hours",Hours)}
+ImportKind=Literal["fees","attendance","hours","picks","flows"]
+MODELS={"fees":("fee",Fee),"attendance":("attendance",Attendance),"hours":("hours",Hours),"picks":("pick",Pick),"flows":("flow",Flow)}
 LABELS={"key":"单号","project":"项目编号","day":"日期","voucher":"凭证号","subject":"科目","category":"费用类别","amount":"金额","treatment":"会计处理","note":"摘要","type":"特殊事项","basis":"分摊依据","positive":"符合加计","hightech":"符合高企","person":"人员","month":"月份","hours":"工时","salary":"工资","insurance":"五险一金","external":"外聘劳务","agreement":"外聘协议索引","direct":"直接研发人员","tech":"科技人员","activity":"活动类型","tax_line":"申报明细行"}
+LABELS.update(trial="试制单号",pick="原领料单号",material="物料名称",batch="批次",unit="单位",qty="数量",price="单价",stock="可用库存",destination="去向",location="收发位置",income="处置收入")
+LABELS.update(scheduled_hours='应出勤小时',leave_hours='休假小时',absence_hours='缺勤小时',overtime_hours='加班小时',pension='基本养老保险',medical='基本医疗保险',unemployment='失业保险',injury='工伤保险',maternity='生育保险',housing='住房公积金',material_code='物料编码',specification='规格型号',requested='请领数量',voucher_type='凭证种类')
 REVERSE={v:k for k,v in LABELS.items()}
 
 @router.get("/imports/{kind}/template")
-def template(kind:Literal["fees","attendance","hours"],u:Actor):
+def template(kind:ImportKind,u:Actor):
     _,model=MODELS[kind]
-    headers=[LABELS.get(k,k) for k in model.model_fields if k!="task"]
+    headers=[LABELS.get(k,k) for k in model.model_fields if k not in {"task","shares"}]
     return deliver(write_xlsx([("导入", [headers]),("填写说明",[["栏目","说明"],["项目编号","填写内部审核通过的项目编号"],["活动类型","rd 或 nonrd"],["日期","YYYY-MM-DD"],["布尔值","是或否"],["单号","每行唯一；重复单号整批退回"]])]),
         kind+"-导入模板.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 @router.post("/imports/{kind}")
-def ingest(kind:Literal["fees","attendance","hours"],request:Request,db:DB,u:Actor,task:int=Body(...),file:UploadFile=File(...)):
+def ingest(kind:ImportKind,request:Request,db:DB,u:Actor,task:int=Body(...),file:UploadFile=File(...)):
     t=business_task(db,u,task)
     if t.line!="finance":fail(422,"请从财务任务导入")
     data=file.file.read(8*1024*1024+1)
@@ -65,6 +68,13 @@ def ingest(kind:Literal["fees","attendance","hours"],request:Request,db:DB,u:Act
             p=projects.get(str(raw["project"])) if raw.get("project") else None
             if raw.get("project") and not p:raise ValueError("项目编号未出现在该订单已审核项目中")
             if p:raw["project"]=p.id
+            for ref in ("trial","pick"):
+                if ref in raw:
+                    linked=db.scalar(select(Entry.id).where(Entry.task==task,Entry.kind==ref,Entry.key==str(raw[ref])))
+                    if linked is None:raise ValueError("关联单号不存在于该任务")
+                    raw[ref]=linked
+            if "destination" in raw:
+                raw["destination"]={"流转":"transfer","消耗":"consume","退料":"return","样品":"sample","处置":"disposal"}.get(raw["destination"],raw["destination"])
             f=model.model_validate({"task":task,**raw})
             if kind=="attendance":
                 f.key=f.month+"/"+f.person
@@ -75,10 +85,13 @@ def ingest(kind:Literal["fees","attendance","hours"],request:Request,db:DB,u:Act
                 k=(f.person,f.day.isoformat());daily[k]=daily.get(k,0)+f.hours
                 if daily[k]>24:raise ValueError("当日累计工时超过24")
             keys.add(f.key)
-            db.add(Entry(task=t.id,project=p.id if p else None,key=f.key,kind=entry_kind,state="posted" if kind=="fees" else "draft",payload=f.model_dump(mode="json"),actor=u.id))
+            if kind in {"picks","flows"}:
+                (save_pick if kind=="picks" else save_flow)(f,db,u,t)
+            else:
+                db.add(Entry(task=t.id,project=p.id if p else None,key=f.key,kind=entry_kind,state="posted" if kind=="fees" else "draft",payload=f.model_dump(mode="json"),actor=u.id))
             added+=1
-        except (ValidationError,ValueError) as exc:
-            msg="；".join(".".join(map(str,e["loc"]))+" "+e["msg"] for e in exc.errors()) if isinstance(exc,ValidationError) else str(exc)
+        except (ValidationError,ValueError,HTTPException) as exc:
+            msg="；".join(".".join(map(str,e["loc"]))+" "+e["msg"] for e in exc.errors()) if isinstance(exc,ValidationError) else str(exc.detail) if isinstance(exc,HTTPException) else str(exc)
             errors.append(f"第{num}行：{msg}")
             if len(errors)>=20:break
     if errors:db.rollback();fail(422,"整批未保存。"+"；".join(errors))

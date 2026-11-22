@@ -22,7 +22,7 @@ async def startup(app):
     initialize()
     yield
 
-app=FastAPI(title="科研财税协同内部服务",version="1.0.0",lifespan=startup,docs_url="/api/docs",redoc_url=None,openapi_url="/api/openapi.json")
+app=FastAPI(title="科研财税协同内部服务",version="1.1.0",lifespan=startup,docs_url="/api/docs",redoc_url=None,openapi_url="/api/openapi.json")
 app.include_router(auth.router,prefix="/api/v1")
 app.include_router(local.router,prefix="/api/v1")
 app.include_router(materials.router,prefix="/api/v1")

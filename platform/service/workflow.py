@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Literal
 
@@ -7,7 +7,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import Field, model_validator
 from sqlalchemy import and_, false, or_, select, true
 
-from .auth import Actor, DB, Form, fail, ok, public, record, require, roles
+from .auth import Actor, DB, Form, departments_for,fail, ok, profile,public, record, require, roles
 from .db import Contract, Customer, Department, Entry, FileObject, History, Member, Order, Project, Task, User, now
 
 router=APIRouter()
@@ -32,6 +32,7 @@ def access_tasks(db,u):
 
 def access_customers(db,u):
     grant=roles(u)
+    if "admin" in grant:return true()
     scopes=[Customer.id.in_(select(Task.customer).where(access_tasks(db,u)))]
     if grant.intersection({"manager","director"}):
         scopes.extend([Customer.manager==u.id,Customer.department==u.department])
@@ -64,6 +65,7 @@ def projects_query(db,u):
     return select(Project).where(Project.order_id.in_(orders)|Project.task.in_(tasks))
 
 def commercial_scope(db,u,cls):
+    if cls==Contract and "admin" in roles(u):return true()
     if roles(u).intersection({"manager","director"}):
         return cls.customer.in_(select(Customer.id).where(access_customers(db,u),Customer.deleted.is_(False)))
     assigned=select(Task.order_id).where(access_tasks(db,u))
@@ -178,8 +180,9 @@ class Decision(Form):
     revision:int=Field(gt=0)
     version:int=Field(ge=0,default=0)
     opinion:str=Field(default="",max_length=3000)
-    result:Literal["pass","return"]="pass"
+    result:Literal["pass","return","consult"]="pass"
     owner:int|None=Field(default=None,gt=0)
+    consultant:int|None=Field(default=None,gt=0)
 
 def object_info(row):
     out={c.name:getattr(row,c.name) for c in row.__table__.columns}
@@ -244,16 +247,20 @@ def save_contract(c,form,db,u,request):
 
 @router.post("/contracts")
 def add_contract(form:ContractData,request:Request,db:DB,u:Actor):
-    manage_customer(db,u,form.customer)
+    contract_writer(db,u,form.customer)
     return save_contract(Contract(),form,db,u,request)
 
 @router.put("/contracts/{cid}")
 def edit_contract(cid:int,form:ContractData,request:Request,db:DB,u:Actor):
     c=db.get(Contract,cid)
     if not c:fail(404,"找不到合同")
-    manage_customer(db,u,c.customer);checked_revision(c,form.revision)
+    contract_writer(db,u,c.customer);checked_revision(c,form.revision)
     if form.customer!=c.customer:fail(422,"合同不可变更所属客户")
     return save_contract(c,form,db,u,request)
+
+def contract_writer(db,u,cid):
+    require(u,"admin","manager")
+    return visible_customer(db,u,cid) if "admin" in roles(u) else manage_customer(db,u,cid)
 
 @router.post("/contracts/{cid}/approve")
 def approve_contract(cid:int,form:Decision,request:Request,db:DB,u:Actor):
@@ -296,7 +303,9 @@ def event(db,t,u,action,note="",snapshot=None):
 def assignable(db,u,uid,line):
     person=db.get(User,uid)
     if not person or not person.enabled or not roles(person).intersection({"staff","leader"}):fail(422,"承办人须为启用的承办岗位")
-    if db.get(Department,person.department).line!=line:fail(422,"承办人业务线不符")
+    candidates=[profile(person,d) for d in departments_for(person) if db.get(Department,d).line==line]
+    person=next((p for p in candidates if roles(p)&{"staff","leader"} and (roles(u)!={"leader"} or p.department==u.department)),None)
+    if not person:fail(422,"承办人业务线不符")
     if roles(u)=={"leader"} and (person.department!=u.department or person.team!=u.team):fail(403,"主管只能在本团队分派")
     if uid==u.id:fail(403,"派单与经办须由不同人员承担")
     return person
@@ -352,15 +361,29 @@ def task_detail(tid:int,db:DB,u:Actor):
     assistants=list(db.scalars(select(Member.user).where(Member.task==tid)))
     for h in history:
         if h.action=="team" and h.snapshot:reviewers_blocked.update(h.snapshot["before"])
+    entries=[object_info(i) for i in db.scalars(select(Entry).where(Entry.task==tid))]
+    files=[file_info(i) for i in db.scalars(select(FileObject).where(FileObject.task==tid))]
+    from .materials import evidence_check,project_evidence
+    project_ids={e["project"] for e in entries if e["project"]}|{f["project"] for f in files if f["project"]}
+    relevant=db.scalars(select(Project).where(Project.order_id==t.order_id,or_(Project.task==t.id,Project.id.in_(project_ids))))
     return ok({"task":object_info(t),"assistants":assistants,"history":[object_info(i) for i in history],
+        "review_clock":review_clock(t,history),
         "people":{person.id:person.name for person in db.scalars(select(User).where(User.id.in_(involved)))},
         "can_edit":bool(roles(u)&{"leader","staff"}) and (member or t.owner==u.id),
         "can_audit":not member and u.id not in reviewers_blocked|{t.owner,t.dispatcher},
-        "entries":[object_info(i) for i in db.scalars(select(Entry).where(Entry.task==tid))],
-        "files":[file_info(i) for i in db.scalars(select(FileObject).where(FileObject.task==tid))]})
+        "entries":entries,"files":files,"evidence_check":evidence_check(t,files,entries),"project_evidence":project_evidence(t,files,entries,relevant)})
 
 def file_info(f):
     return fields(f,"id","task","project","category","name","digest","size","previous","actor","at")
+
+def review_clock(task,history):
+    if task.status not in {"leader","manager","director"}:return None
+    for h in reversed(history):
+        if h.action not in {"submit","audit.pass"}:continue
+        transition=(h.snapshot or {}).get("transition",{})
+        limit=transition.get("hours",48)
+        due=h.at+timedelta(hours=limit)
+        return {"stage":task.status,"started":h.at,"due":due,"hours":limit,"overdue":now()>due}
 
 @router.put("/tasks/{tid}/draft")
 def draft(tid:int,form:Draft,request:Request,db:DB,u:Actor):
@@ -388,10 +411,15 @@ def working_digest(db,t):
 def publish_projects(db,t):
     if t.kind!="立项":return
     submitted=t.draft.get("projects",[])
+    linked=[e.payload["code"] for e in db.scalars(select(Entry).where(Entry.task==t.id,Entry.kind=="draft_material"))]
+    if set(linked)-{p["code"] for p in submitted}:fail(409,"立项材料关联的项目编号须保留，先核对清单")
     existing=list(db.scalars(select(Project).where(Project.task==t.id)))
     if {p.code for p in existing}-{p["code"] for p in submitted}:fail(409,"已发布的项目不可移除，请办理项目调整")
     for p in submitted:
         obj=next((i for i in existing if i.code==p["code"]),None)
+        if obj and obj.details.get("closed"):
+            if any(obj.details.get(k)!=v for k,v in p.items()):fail(409,"已结题的项目基线不能覆盖")
+            continue
         if not obj:
             obj=Project(customer=t.customer,task=t.id,order_id=t.order_id,code=p["code"])
             db.add(obj)
@@ -403,6 +431,7 @@ def advance(tid:int,action:Literal["accept","reject","reassign","suspend","resum
     note=form.opinion
     if (action in {"reject","reassign","suspend","confirm"} or form.result=="return") and not note:fail(422,"请填写办理意见或凭据")
     before=t.status;snapshot=None
+    if action!="audit" and form.result=="consult":fail(422,"仅审核环节可转会审")
     if action in {"accept","reject"}:
         if t.status!="assigned" or t.owner!=u.id:fail(403,"仅待接件任务的主办人可处理")
         require(u,"staff","leader")
@@ -419,6 +448,13 @@ def advance(tid:int,action:Literal["accept","reject","reassign","suspend","resum
         t.status=t.previous;t.previous=None
     elif action=="submit":
         require_writer(db,u,t)
+        from .configuration import effective_rules,rule_hits
+        rules=effective_rules(db,date.today().isoformat())
+        if rules:
+            work=list(db.scalars(select(Entry).where(Entry.task==tid)))
+            files=list(db.scalars(select(FileObject.id).where(FileObject.task==tid)))
+            blocked=[r["name"] for r in rule_hits(rules,t,work,files) if r["severity"]=="阻断"]
+            if blocked:fail(409,"请先处理规则："+ "、".join(blocked))
         if t.owner!=u.id or not t.draft.get("summary"):fail(422,"请由主办人填写底稿并提交")
         if t.kind=="立项" and not t.draft.get("projects"):fail(422,"请填写立项清单")
         if t.line=="finance" and not db.scalar(select(Project.id).where(Project.order_id==t.order_id).limit(1)):fail(409,"财务需等待同订单立项通过内部审核")
@@ -439,6 +475,7 @@ def advance(tid:int,action:Literal["accept","reject","reassign","suspend","resum
             signatures={e.key for e in db.scalars(select(Entry).where(Entry.task==tid,Entry.kind=="cosign",Entry.state=="signed")) if e.payload.get("digest")==digest}
             if signatures!={"research","finance"}:fail(409,"当前版本需要科研、财务两线确认，请到协作与记录办理")
         t.version+=1;t.status="leader";snapshot=business_snapshot(db,t)
+        snapshot["risk_rule_versions"]=[r["id"] for r in rules]
     elif action=="audit":
         if t.status not in {"leader","manager","director"}:fail(409,"当前状态不能审核")
         require(u,t.status)
@@ -447,8 +484,28 @@ def advance(tid:int,action:Literal["accept","reject","reassign","suspend","resum
             or_(History.action.in_(["assign","reassign","submit"]),and_(History.version==t.version,History.action=="audit.pass"))).limit(1))
         former=any(u.id in (h.snapshot or {}).get("before",[]) for h in db.scalars(select(History).where(History.task==tid,History.action=="team")))
         if u.id in {t.dispatcher,t.owner} or db.get(Member,(tid,u.id)) or acted or former:fail(403,"派单、经办和逐级审核须回避")
-        if form.result=="return":t.status="revision"
+        open_consult=db.scalar(select(Entry).where(Entry.task==tid,Entry.kind=="consult",Entry.state=="open"))
+        if form.result=="consult":
+            if open_consult:fail(409,"已有待回复的会审")
+            person=db.get(User,form.consultant) if form.consultant else None
+            if not note or not person or not person.enabled or not roles(person)&{"leader","manager","director"}:
+                fail(422,"请选择会审人员并填写事项")
+            if person.id in {u.id,t.owner,t.dispatcher} or db.get(Member,(tid,person.id)):fail(403,"会审与经办须回避")
+            db.add(Entry(task=tid,kind="consult",key=f"{t.version}/{t.revision}",state="open",actor=u.id,
+                payload={"consultant":person.id,"stage":before,"version":t.version,"question":note}))
+            t.revision+=1
+        elif form.result=="return":
+            if open_consult:open_consult.state="cancelled"
+            t.status="revision"
         else:
+            if open_consult:fail(409,"请等待会审人回复")
+            if t.line=="finance" or t.kind=="结题":
+                submission=db.scalar(select(History).where(History.task==tid,History.version==t.version,History.action=="submit").order_by(History.id.desc()).limit(1))
+                if submission and submission.snapshot:
+                    referenced={e.get("project") for e in submission.snapshot.get("entries",[]) if e.get("project")}
+                    for old in submission.snapshot.get("projects",[]):
+                        if old["id"] in referenced and db.get(Project,old["id"]).details!=old["details"]:
+                            fail(409,"审核期间项目基线发生变化，请退回并重新核对后提交")
             t.status={"leader":"manager","manager":"director" if t.major else "customer","director":"customer"}[t.status]
             if t.status=="customer":
                 publish_projects(db,t)
@@ -462,12 +519,23 @@ def advance(tid:int,action:Literal["accept","reject","reassign","suspend","resum
         require(u,"manager","director")
         if t.status!="customer":fail(409,"尚未进入客户确认")
         t.status="complete" if form.result=="pass" else "revision"
+        if t.kind=="结题" and form.result=="pass":
+            from .operations import check_settlement
+            check_settlement(db,t)
+            for close in db.scalars(select(Entry).where(Entry.task==tid,Entry.kind=="settlement")):
+                p=db.scalar(select(Project).where(Project.id==close.project).with_for_update())
+                if p.details.get("closed") and p.details["closed"]["task"]!=tid:fail(409,"项目已有其他结题记录")
+                p.details={**p.details,"closed":{"task":tid,"date":date.today().isoformat(),"result":close.payload["conclusion"]}}
     elif action=="archive":
         require(u,"manager","director","admin")
         if t.status!="complete":fail(409,"仅客户确认后可归档")
         t.status="archived"
         approved=db.scalar(select(History).where(History.task==tid,History.action=="audit.pass",History.version==t.version).order_by(History.id.desc()).limit(1))
         snapshot=approved.snapshot if approved and approved.snapshot else business_snapshot(db,t)
+    if before!=t.status and action!="archive":
+        from .configuration import routing
+        limits=routing(db) if t.status in {"leader","manager","director"} else {}
+        snapshot={**(snapshot or {}),"transition":{"from":before,"to":t.status,"hours":limits.get(t.status+"_hours",48)}}
     event(db,t,u,action+("."+form.result if action in {"audit","confirm"} else ""),note,snapshot)
     record(db,request,u,"task."+action,tid,{"from":before,"to":t.status,"version":t.version})
     db.commit();return ok(object_info(t))

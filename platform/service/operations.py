@@ -7,13 +7,49 @@ from pydantic import Field
 from sqlalchemy import ForeignKey, String, Column, JSON, select
 
 from .auth import Actor, DB, Form, fail, ok, record, require
-from .db import Base, ID, Contract, Entry, FileObject, History, Project, Task, User
+from .db import Base, ID, Contract, Department, Entry, FileObject, History, Project, Task, User, now
 from .finance import WorkBase, save, write_xlsx
-from .materials import deliver, project_for
+from .materials import Comment, deliver, project_for
 from .workflow import (ProjectData, access_tasks, manage_customer, object_info,
                        require_writer, visible_customer, visible_task)
 
 router=APIRouter()
+
+class Consultation(Form):
+    research_rep:int=Field(gt=0)
+    finance_rep:int=Field(gt=0)
+    qualifies:Literal["符合","待补充","不符合"]
+    industry_check:Literal["未发现负面清单情形","需要复核","涉及负面清单"]
+    conclusion:str=Field(min_length=1,max_length=1500)
+
+@router.post("/tasks/{tid}/preconsult")
+def preconsult(tid:int,form:Consultation,request:Request,db:DB,u:Actor):
+    t=visible_task(db,u,tid,True);require(u,"manager","director");manage_customer(db,u,t.customer)
+    if t.kind!="立项" or t.status not in {"assigned","working","revision"}:fail(409,"请在立项送审前记录会商结论")
+    for uid,line in [(form.research_rep,"research"),(form.finance_rep,"finance")]:
+        rep=db.get(User,uid)
+        if not rep or not rep.enabled or db.get(Department,rep.department).line!=line:fail(422,"请选择实际参会的两线人员")
+    e=Entry(task=tid,actor=u.id,kind="preconsult",key=str(t.revision),state="recorded",payload=form.model_dump())
+    db.add(e);t.revision+=1;db.flush();return saved(db,request,u,e)
+
+@router.get("/consultations/assigned")
+def assigned_consultations(db:DB,u:Actor):
+    require(u,"leader","manager","director")
+    rows=db.execute(select(Entry,Task.title).join(Task,Entry.task==Task.id).where(
+        Entry.kind=="consult",Entry.payload["consultant"].as_integer()==u.id).order_by(Entry.id.desc()))
+    return ok([{"id":e.id,"title":title,"state":e.state,**e.payload} for e,title in rows])
+
+@router.post("/consultations/{eid}/reply")
+def answer_consultation(eid:int,form:Comment,request:Request,db:DB,u:Actor):
+    require(u,"leader","manager","director")
+    e=db.get(Entry,eid)
+    if not e or e.kind!="consult" or e.payload["consultant"]!=u.id:fail(404,"没有指派给你的会审")
+    t=db.scalar(select(Task).where(Task.id==e.task).with_for_update())
+    if e.state!="open" or t.status!=e.payload["stage"] or t.version!=e.payload["version"]:fail(409,"该会审已结束")
+    e.payload={**e.payload,"reply":form.note,"replied_at":now().isoformat()};e.state="replied";t.revision+=1
+    from .workflow import event
+    event(db,t,u,"consult.reply",form.note)
+    return saved(db,request,u,e)
 
 class Receipt(Base):
     __tablename__="biz_receipt"
@@ -100,6 +136,7 @@ def achievements(db:DB,u:Actor):
 @router.post("/adjustments")
 def adjust(form:Adjustment,request:Request,db:DB,u:Actor):
     t,p=working(db,u,form)
+    if p.details.get("closed"):fail(409,"已确认结题的项目基线已锁定")
     if t.kind!="调整" or form.after.code!=p.code:fail(422,"请从调整任务选择原项目并保留原编号")
     fees=db.scalars(select(Entry).where(Entry.project==p.id,Entry.kind=="fee"))
     if form.after.budget<sum(Decimal(e.payload["amount"]) for e in fees):fail(422,"预算不能低于已登记费用")
@@ -114,8 +151,22 @@ def adjust(form:Adjustment,request:Request,db:DB,u:Actor):
 def apply_changes(db,t):
     for e in db.scalars(select(Entry).where(Entry.task==t.id,Entry.kind=="adjustment",Entry.state=="draft")):
         p=db.scalar(select(Project).where(Project.id==e.project).with_for_update())
+        if p.details.get("closed"):fail(409,"项目已结题，不能生效新的调整")
         if p.details!=e.payload["before"]:fail(409,"项目基线已更新，请退回重新核对")
-        after=e.payload["after"];p.name=after["name"];p.budget=Decimal(after["budget"]);p.details=after;e.state="applied"
+        after=e.payload["after"]
+        previous=p.details
+        movements=list(db.execute(select(Entry,Task).join(Task,Task.id==Entry.task).where(Entry.project==p.id,Entry.kind.in_(["hours","fee"]))))
+        fees=[row for row,_ in movements if row.kind=="fee"]
+        total=sum((Decimal(row.payload["amount"]) for row in fees if row.payload["type"] not in {"特殊收入","产品材料冲减","不征税补助","试运行销售"}),Decimal(0))
+        if total>Decimal(after["budget"]):fail(409,"送审后费用已增加，调整预算低于当前归集额")
+        changed=[];outside=[]
+        for row,task in movements:
+            if not after["start"]<=row.payload["day"]<=after["end"]:outside.append(row.key)
+            if (row.kind=="fee" and task.status in {"working","revision"} and previous.get("treatment")!=after["treatment"]
+                    and row.payload["treatment"]==previous.get("treatment")):
+                row.payload={**row.payload,"treatment":after["treatment"]};task.revision+=1;changed.append(row.key)
+        e.payload={**e.payload,"recalculation":{"amount":str(total),"remaining":str(Decimal(after["budget"])-total),"updated_drafts":changed,"outside_period":outside}}
+        p.name=after["name"];p.budget=Decimal(after["budget"]);p.details=after;e.state="applied"
 
 @router.post("/collections")
 def collection(form:Note,request:Request,db:DB,u:Actor):
@@ -133,12 +184,20 @@ def collection(form:Note,request:Request,db:DB,u:Actor):
 @router.get("/risks")
 def risks(db:DB,u:Actor):
     items=[]
+    from .configuration import effective_rules,rule_hits
+    configured=effective_rules(db,date.today().isoformat())
     for t in db.scalars(select(Task).where(access_tasks(db,u))):
         es=list(db.scalars(select(Entry).where(Entry.task==t.id)))
         def add(key,severity,description):
             fixes=[e.payload["note"] for e in es if e.kind=="collection" and e.key==key and e.state=="已整改"]
             items.append({"task":t.id,"title":t.title,"key":key,"severity":severity,"description":description,"resolution":"；".join(fixes)})
-        if not db.scalar(select(FileObject.id).where(FileObject.task==t.id).limit(1)):add("material","警告","任务尚未上传证明材料")
+        from .materials import evidence_check
+        from .workflow import file_info
+        fs=[file_info(f) for f in db.scalars(select(FileObject).where(FileObject.task==t.id))]
+        if not fs:add("material","警告","任务尚未上传证明材料")
+        for rule in rule_hits(configured,t,es,fs):add("rule-"+str(rule["id"]),rule["severity"],rule["name"]+" · "+rule["reference"])
+        coverage=evidence_check(t,fs,[object_info(e) for e in es if e.kind in {"evidence","document"}])
+        if coverage["missing"]:add("stage-evidence","警告","缺少关键材料："+"、".join(coverage["missing"]))
         if t.deadline<date.today().isoformat() and t.status not in {"complete","archived","suspended"}:add("deadline","提示","已过办理期限")
         from .db import Customer
         from .finance import pick_balance
@@ -147,6 +206,8 @@ def risks(db:DB,u:Actor):
             if not project.get("milestones"):add("milestone-"+project["code"],"提示",project["code"]+" 尚未登记量化里程碑")
         ratios={}
         for e in es:
+            if e.kind=="issue" and e.state!="closed" and e.payload.get("due","") and e.payload["due"]<date.today().isoformat():
+                add("issue-due-"+str(e.id),"警告","补件已过回复期限："+e.payload["question"])
             if e.kind=="collection" and e.state in {"未提供","待补充"}:add("missing-"+str(e.id),"警告",e.payload["category"]+"仍"+e.state)
             if e.kind=="issue" and e.state!="closed":add("issue-"+str(e.id),"阻断",e.payload["question"])
             if e.kind=="fee" and (not e.payload.get("positive",True) or (e.payload["type"]=="共用" and not e.payload["basis"])):add("fee-"+str(e.id),"警告",e.payload["voucher"]+"需核对加计资格与分摊依据")
@@ -261,15 +322,16 @@ def client_file(cid:int,request:Request,db:DB,u:Actor):
 def notices(db:DB,u:Actor):
     from datetime import timedelta
     from .auth import roles
-    from .workflow import STATUS
+    from .workflow import STATUS,review_clock
     due=(date.today()+timedelta(days=3)).isoformat()
     items=[]
     for t in db.scalars(select(Task).where(access_tasks(db,u)).order_by(Task.id.desc())):
         h=db.scalar(select(History).where(History.task==t.id).order_by(History.id.desc()).limit(1))
         if not h:continue
+        clock=review_clock(t,list(db.scalars(select(History).where(History.task==t.id).order_by(History.id)))) if t.status in {"leader","manager","director"} else None
         overdue=t.deadline<=due and t.status not in {"archived","complete","suspended"}
         items.append({"id":h.id,"task":t.id,"name":t.title,"state":STATUS[t.status],"action":h.action,"day":h.at,
-                      "note":h.note,"due":"已超期" if overdue and t.deadline<str(date.today()) else "临期" if overdue else ""})
+                      "note":h.note,"due":"审核超期" if clock and clock["overdue"] else "已超期" if overdue and t.deadline<str(date.today()) else "临期" if overdue else ""})
     return ok(items)
 
 @router.get("/management/stats")

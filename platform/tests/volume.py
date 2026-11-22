@@ -43,7 +43,17 @@ def run(c):
     gen_time=perf_counter()-t
     t=perf_counter();book=c.get(api+f"/subsidiary?customer={cid}&year={year}&edition=2021&snapshot={v['snapshot_id']}&filing=true",headers=manager)
     assert book.status_code==200 and book.content.startswith(b"PK"),book.text[:100]
-    print(f"PASS 10000-row import {import_time:.2f}s, 100-project calculation {gen_time:.2f}s, XLSX export {perf_counter()-t:.2f}s",flush=True)
+    export_time=perf_counter()-t
+    from concurrent.futures import ThreadPoolExecutor
+    def timed_read(i):
+        start=perf_counter()
+        response=c.get(api+"/tasks?page_size=20",headers=manager if i%2==0 else finance)
+        return response.status_code,perf_counter()-start
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results=list(pool.map(timed_read,range(160)))
+    assert all(status==200 for status,_ in results)
+    p95=sorted(elapsed for _,elapsed in results)[151]
+    print(f"PASS 10000-row import {import_time:.2f}s, 100-project calculation {gen_time:.2f}s, XLSX export {export_time:.2f}s, 8 concurrent readers: 160/160, P95 {p95:.3f}s",flush=True)
 if __name__=="__main__":
     try:
         with TestClient(app,client=("127.0.0.1",50001)) as client:run(client)

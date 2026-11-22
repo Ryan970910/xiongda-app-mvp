@@ -73,13 +73,16 @@ def calculate(year,projects,fees,annuals,carry,rate):
     byid={p.id:p for p in projects};ids=list(byid);actual=defaultdict(Decimal);hi=defaultdict(lambda:[ZERO]*9)
     buckets=defaultdict(lambda:[ZERO]*9);lines=defaultdict(Decimal);warnings=set();missing=set()
     special=defaultdict(Decimal);products=defaultdict(Decimal);grants=defaultdict(Decimal)
-    details=[];split=defaultdict(Decimal);formed={}
+    details=[];voucher_rows=[];treatment_rows=[];split=defaultdict(Decimal);formed={}
     for e in annuals:
         if e.payload.get("formed"):formed[e.project]=int(e.payload["formed"][:4])
     for e in fees:
         p=e.payload;k=e.project;v=amounts(e,"amount");i=CATEGORIES.index(p["category"]);y=int(p["day"][:4]);typ=p["type"]
         cap=p["treatment"]=="资本化"
+        eligible=p["positive"] and typ not in {"房屋折旧租赁","长期待摊","特殊收入","产品材料冲减","不征税补助","试运行销售"} and (typ!="共用" or bool(p["basis"]))
         if y==year:
+            voucher_rows.append([byid[k].code,byid[k].name,p["treatment"],p["day"],p.get("voucher_type",""),p["voucher"],p["note"],v,
+                                 v if eligible and i!=8 else ZERO,*[v if eligible and i==n else ZERO for n in range(8)]])
             details.append([k,p["day"],p["voucher"],p["subject"],p["note"],p["category"],v,typ,p.get("basis",""),p["treatment"]])
             if typ=="特殊收入":special[k]+=v;continue
             if typ=="产品材料冲减":products[k]+=v;continue
@@ -90,7 +93,7 @@ def calculate(year,projects,fees,annuals,carry,rate):
         if typ in {"特殊收入","产品材料冲减","不征税补助","试运行销售"}:continue
         if cap and y<=year and k not in formed:warnings.add(byid[k].code+"：资本化支出尚无已确认的资产形成日期")
         if (cap and (formed.get(k)!=year or y>year)) or (not cap and y!=year):continue
-        if not p["positive"] or typ in {"房屋折旧租赁","长期待摊"} or (typ=="共用" and not p["basis"]):
+        if not eligible:
             warnings.add(p["voucher"]+"：按费用资格或分摊依据排除");continue
         buckets[k][i]+=v
         split[k,i,p["treatment"]]+=v
@@ -115,9 +118,15 @@ def calculate(year,projects,fees,annuals,carry,rate):
     for k in ids:
         b=buckets[k];eligible=list(b[:5])+[other[k],domestic[k],allowed[k],ZERO]
         base=sum(eligible);cap_total=ZERO
+        treatment_totals={name:[] for name in ("费用化","资本化")}
         for i,value in enumerate(eligible):
             share=distribute(value,{"资本化":split[k,i,"资本化"],"费用化":split[k,i,"费用化"]})
             cap_total+=share["资本化"]
+            for name in treatment_totals:treatment_totals[name].append(share[name])
+        for name,net in treatment_totals.items():
+            gross=[split[k,i,name] for i in range(8)]
+            if any(gross) or (not any(b) and name==byid[k].details.get("treatment","费用化")):
+                treatment_rows.append([byid[k].code,byid[k].name,name,sum(net),*gross[:5],sum(gross[:5]),gross[5],net[5],gross[6],net[6],gross[7],net[7]])
         lines[42]+=cap_total;lines[41]+=base-cap_total
         project=byid[k];high=cent(sum(hi[k])-hi[k][5]+high_other[k])
         result.append(dict(id=k,code=project.code,name=project.name,category=project.details["category"],account=cent(actual[k]),
@@ -135,10 +144,14 @@ def calculate(year,projects,fees,annuals,carry,rate):
     balance=lines[47]-lines[48]-lines[49];lines[50]=rate/100;lines[51]=cent(max(ZERO,balance)*lines[50]);lines[52]=max(ZERO,-balance)
     if sum(grants.values()):warnings.add("已登记不征税补助，请逐笔确认关联的支出已标记不符合加计，避免重复冲减")
     if missing:warnings.add("凭证缺少申报明细行："+", ".join(sorted(missing)))
-    checks={"项目与年度合计":sum((r["deduction"] for r in result),ZERO)==lines[40],
+    ordinary=sum((row[6] for row in details if row[7] not in {"特殊收入","产品材料冲减","不征税补助","试运行销售"}),ZERO)
+    checks={"会计汇总与原始凭证":sum((r["account"] for r in result),ZERO)==ordinary,
+            "A107012六类小计与明细":all(lines[top]==sum((lines[n] for n in range(top+1,end+1)),ZERO)
+                                     for top,end in [(3,6),(7,15),(16,18),(19,22),(23,27),(28,33)]),
+            "项目与年度合计":sum((r["deduction"] for r in result),ZERO)==lines[40],
             "费用化与资本化":lines[40]==lines[2]+sum(domestic.values())+lines[38],
             "申报明细行完整":not missing,"补助关联已复核":not any(grants.values())}
-    return dict(projects=result,details=details,warnings=sorted(warnings),checks=checks,
+    return dict(projects=result,details=details,voucher_rows=voucher_rows,treatment_rows=treatment_rows,warnings=sorted(warnings),checks=checks,
                 mapping={str(r):cent(Decimal(lines[r])) for r in range(1,53)},carry=lines[52])
 
 def report(form,db,u):
@@ -149,13 +162,14 @@ def report(form,db,u):
     for y in sorted(years):
         result=calculate(y,projects,fees,[e for e in annuals if e.payload["year"]<=y],carry,Decimal(form.rate));carry=result["carry"]
     if c.details.get("negative_hint"):result["warnings"].append("负面清单行业需按实际主营收入核实资格")
-    return {**result,"year":form.year,"edition":form.edition,"customer":c.name,"status":"年度复核底稿","policy":FORM_SOURCE}
+    result["project_state"]={p.code:"已结束" if (p.details.get("closed") or {}).get("date","9999")<=f"{form.year}-12-31" else "未结束" for p in projects}
+    return {**result,"year":form.year,"edition":form.edition,"customer":c.name,"customer_code":c.code,"status":"年度复核底稿","policy":FORM_SOURCE}
 
 @router.post("/subsidiary/generate")
 def generate(form:Ledger,request:Request,db:DB,u:Actor):
     from fastapi.encoders import jsonable_encoder
     result=report(form,db,u)
-    result["generated_at"]=now().isoformat();result["rule_version"]="研发年度核对 1.0"
+    result["generated_at"]=now().isoformat();result["rule_version"]="研发年度核对 1.1"
     snap=SavedBook(customer=form.customer,actor=u.id,period=str(form.year),inputs=form.model_dump(),
                    payload=jsonable_encoder(result,custom_encoder={Decimal:str}))
     db.add(snap);db.flush();record(db,request,u,"ledger.generate",form.customer,{"snapshot":snap.id,**form.model_dump()})
@@ -168,7 +182,8 @@ def book_history(customer:int,db:DB,u:Actor):
     return ok([{"id":s.id,**s.inputs,"generated_at":s.payload["generated_at"]} for s in db.scalars(select(SavedBook).where(SavedBook.customer==customer).order_by(SavedBook.id.desc()))])
 
 @router.get("/subsidiary")
-def export(customer:int,year:int,edition:Literal["2015","2021"],request:Request,db:DB,u:Actor,rate:Literal["100","120","75","50"]="100",filing:bool=False,snapshot:int|None=None):
+def export(customer:int,year:int,edition:Literal["2015","2021"],request:Request,db:DB,u:Actor,rate:Literal["100","120","75","50"]="100",filing:bool=False,snapshot:int|None=None,
+           view:Literal["all","account","hightech","deduction","differences"]="all",layout:Literal["横向","纵向"]="横向"):
     form=Ledger(customer=customer,year=year,edition=edition,rate=rate)
     if snapshot:
         from .workflow import manage_customer
@@ -188,6 +203,15 @@ def export(customer:int,year:int,edition:Literal["2015","2021"],request:Request,
         [p[k] for k in ("code","name","account","hightech","deduction","expense","capitalized","other_allowed","domestic_allowed","foreign_allowed","difference_high","difference_tax")] for p in projects]
     summary.append(["合计",""]+[sum((r[i] for r in summary[1:]),ZERO) for i in range(2,len(summary[0]))])
     sheets=[("年度汇总与差异",summary)]
+    perspectives={"account":("会计口径",2),"hightech":("高企口径",3),"deduction":("加计归集口径",4)}
+    for key,(title,col) in perspectives.items():
+        if view in {"all",key}:
+            sheets.append((title,[[row[0],row[1],row[col]] for row in summary]))
+    if view!="all":
+        if view=="differences":sheets=[("三口径差异调节",summary)]
+        else:sheets=sheets[1:]
+        record(db,request,u,"ledger.export."+view,customer,form.model_dump());db.commit()
+        return deliver(write_xlsx(sheets,layout),f"{year}-{sheets[0][0]}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     header=["项目编号","日期","凭证号","科目","摘要","费用类别","凭证金额","特殊事项","依据","费用化/资本化"]
     if edition=="2015":
         for kind in ["自主","委托","合作","集中"]:
@@ -199,8 +223,14 @@ def export(customer:int,year:int,edition:Literal["2015","2021"],request:Request,
             sheets.append((kind+"研发辅助账",rows))
     else:
         sheets.append(("项目辅助账",[["编号","名称",*CATEGORIES,"费用化归集","资本化归集"]]+[[p["code"],p["name"],*p["categories"],p["expense"],p["capitalized"]] for p in projects]))
+        if "voucher_rows" in r:
+            sheets.append(("2021凭证级辅助账",[["项目编号","项目名称","完成情况","支出类型","日期","凭证种类","凭证号","摘要","会计凭证记载金额","税法归集金额",*CATEGORIES[:8]]]+
+                          [[*row[:2],r["project_state"][row[0]],*row[2:7],*[Decimal(x) for x in row[7:]]] for row in r["voucher_rows"]]))
+            sheets.append(("2021分支出类型汇总",[["项目编号","项目名称","完成情况","支出类型","允许金额",*CATEGORIES[:5],"前五项小计","其他相关费用","限额后其他费用","境内委托","允许境内委托","境外机构委托","限额后境外委托"]]+
+                          [[*row[:2],r["project_state"][row[0]],row[2],*[Decimal(x) for x in row[3:]]] for row in r["treatment_rows"]]))
     sheets.append(("凭证索引",[header]+[[ids[k]["code"],*v] for k,*v in r["details"]]))
     sheets.append(("A107012行次核对",[["行次","项目","数值"]]+[[i,LABEL.get(i,"对应费用明细"),r["mapping"][str(i)]] for i in range(1,53)]))
     sheets.append(("勾稽与政策",[["检查","结果"]]+[[k,"通过" if v else "待复核"] for k,v in r["checks"].items()]+[["提示",v] for v in r["warnings"]]+[["表单依据",FORM_SOURCE]]))
     record(db,request,u,"ledger.export",customer,form.model_dump());db.commit()
-    return deliver(write_xlsx(sheets),f"{year}-{edition}版研发辅助账.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    sheets.append(("编制信息",[["项目","内容"],["纳税人名称",r["customer"]],["纳税人识别号",r.get("customer_code","旧版快照未记录")],["所属年度",year],["金额单位","元"],["账表版本",edition]]))
+    return deliver(write_xlsx(sheets,layout),f"{year}-{edition}版研发辅助账.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

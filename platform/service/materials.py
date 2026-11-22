@@ -5,7 +5,7 @@ import os
 import secrets
 import tempfile
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote
@@ -15,6 +15,7 @@ from fastapi.responses import Response, StreamingResponse
 from docx import Document
 from docx.shared import Cm, Pt, RGBColor
 from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 from sqlalchemy import select
 
 from .auth import Actor, DB, Form, fail, ok, record
@@ -31,6 +32,75 @@ TEMPLATES={t["id"]:t for t in CATALOG}
 FORMATS={".pdf":b"%PDF-",".png":b"\x89PNG\r\n\x1a\n",".jpg":b"\xff\xd8\xff",".jpeg":b"\xff\xd8\xff",
          ".docx":b"PK\x03\x04",".xlsx":b"PK\x03\x04"}
 LIMIT=20*1024*1024
+
+MATERIALS_BY_STAGE={
+    "立项":["立项决议","立项申请","研发任务书"],"调整":["调整申请","会商意见"],
+    "结题":["结题报告","验收证据"],"费用归集":["考勤工资","费用凭证"],
+    "辅助账":["费用凭证","辅助账"],"跟进":["实验记录"]}
+
+class EvidenceLink(Form):
+    task:int=Field(gt=0)
+    file_id:int=Field(gt=0)
+    project:int=Field(gt=0)
+    stage:str=Field(min_length=1,max_length=64)
+    fee_id:int|None=Field(default=None,gt=0)
+
+@router.post("/materials/link")
+def link_evidence(form:EvidenceLink,request:Request,db:DB,u:Actor):
+    t=visible_task(db,u,form.task,True);require_writer(db,u,t);project_for(db,t,form.project)
+    f=db.get(FileObject,form.file_id)
+    if not f or f.task!=t.id or f.project not in (None,form.project):fail(422,"材料须属于当前任务和项目")
+    if form.fee_id:
+        fee=db.get(Entry,form.fee_id)
+        if not fee or fee.kind!="fee" or fee.task!=t.id or fee.project!=form.project:fail(422,"凭证须与材料项目及任务一致")
+    e=Entry(task=t.id,project=form.project,kind="evidence",key=f"{f.id}/{form.project}/{form.fee_id or 0}/{form.stage}",state="linked",
+            payload=form.model_dump(),actor=u.id)
+    db.add(e);t.revision+=1;db.flush();record(db,request,u,"material.link",f.id,form.model_dump());db.commit()
+    return ok(object_info(e))
+
+def evidence_check(t,files,entries):
+    replaced={f["previous"] for f in files if f.get("previous")}
+    current={f["id"]:f for f in files if f["id"] not in replaced}
+    linked={e["payload"]["stage"] for e in entries if e["kind"]=="evidence" and e["payload"]["file_id"] in current}
+    present=linked|{f["category"] for f in current.values()}
+    present.update({"resolution":"立项决议","application":"立项申请","taskbook":"研发任务书","completion":"结题报告"}.get(
+        e["payload"].get("layout",{}).get("category"),"") for e in entries if e["kind"]=="document")
+    required=MATERIALS_BY_STAGE.get(t.kind,["证明材料"])
+    missing=[label for label in required if label not in present]
+    return {"required":required,"missing":missing,"percent":round(100*(len(required)-len(missing))/len(required))}
+
+def project_evidence(t,files,entries,projects):
+    rows=[]
+    for p in projects:
+        links=[e for e in entries if e.get("project")==p.id or (e["kind"]=="draft_material" and e["payload"]["code"]==p.code)]
+        ids={e["payload"]["file_id"] for e in links if e["kind"] in {"evidence","draft_material"}}
+        related=[f for f in files if f["project"]==p.id or f["id"] in ids]
+        rows.append({"code":p.code,**evidence_check(t,related,links)})
+    return rows
+
+def delivery_rows(db,t,snapshot):
+    order=db.get(Order,t.order_id)
+    rows=[["订单编号","任务","交付物","数量","版本","校验信息"]]
+    for e in snapshot["entries"]:
+        if e["kind"]=="document":
+            rows.append([order.code,t.title,e["payload"]["title"],1,e["revision"],e["payload"].get("issuance",{}).get("number","")])
+    replaced={f.get("previous") for f in snapshot["files"]}
+    for f in snapshot["files"]:
+        if f["id"] not in replaced:
+            rows.append([order.code,t.title,f["name"],1,f["id"],f["digest"]])
+    if snapshot.get("draft",{}).get("summary"):rows.append([order.code,t.title,"作业底稿",1,t.version,"见提交快照"])
+    return rows
+
+@router.get("/tasks/{tid}/delivery.xlsx")
+def delivery(tid:int,request:Request,db:DB,u:Actor):
+    from .finance import write_xlsx
+    t=visible_task(db,u,tid)
+    if t.status not in {"customer","complete","archived"}:fail(409,"内审通过后可生成交付清单")
+    approved=db.scalar(select(History).where(History.task==tid,History.version==t.version,History.action=="audit.pass").order_by(History.id.desc()).limit(1))
+    snapshot=approved.snapshot if approved and approved.snapshot else business_snapshot(db,t)
+    data=write_xlsx([("交付清单",delivery_rows(db,t,snapshot))])
+    record(db,request,u,"delivery.list",tid);db.commit()
+    return deliver(data,"交付清单.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 def project_for(db,t,pid):
     if pid is None:return None
@@ -78,6 +148,52 @@ def read_blob(f):
 def deliver(data,name,media):
     return Response(data,media_type=media,headers={"Content-Disposition":"attachment; filename*=UTF-8''"+quote(name,safe=""),"Cache-Control":"no-store"})
 
+@router.get("/projects/{pid}/evidence.zip")
+def project_archive(pid:int,request:Request,db:DB,u:Actor):
+    from .workflow import access_tasks
+    from .finance import write_xlsx
+    p=db.scalar(projects_query(db,u).where(Project.id==pid))
+    if not p:fail(404,"项目不存在或不可见")
+    tasks=db.scalars(select(Task).where(Task.order_id==p.order_id,Task.status=="archived",access_tasks(db,u)))
+    index=[["项目编号","任务名称","材料或文书","档案路径","文件指纹或文书版本"]]
+    checks=[["项目编号","归档任务","当前版本","关键材料齐备率","待补材料"]]
+    tmp=tempfile.TemporaryFile(dir=DATA)
+    try:
+        with zipfile.ZipFile(tmp,"w",compression=zipfile.ZIP_DEFLATED) as package:
+            for t in tasks:
+                h=db.scalar(select(History).where(History.task==t.id,History.action=="archive").order_by(History.id.desc()).limit(1))
+                if not h or not h.snapshot:continue
+                snap=h.snapshot
+                links=[e for e in snap["entries"] if e.get("project")==pid or (e["kind"]=="draft_material" and e["payload"]["code"]==p.code)]
+                linked_ids={e["payload"]["file_id"] for e in links if e["kind"] in {"evidence","draft_material"}}
+                one=t.id==p.task and [x["code"] for x in snap["draft"].get("projects",[])]==[p.code]
+                files=[f for f in snap["files"] if f["project"]==pid or f["id"] in linked_ids or (one and f["project"] is None)]
+                entries=[e for e in snap["entries"] if e in links or (one and e["kind"]=="document" and e.get("project") is None)]
+                if not (files or entries or t.id==p.task):continue
+                result=evidence_check(t,files,entries)
+                checks.append([p.code,t.title,t.version,result["percent"],"、".join(result["missing"])])
+                for f in files:
+                    location=f"task-{t.id}/files/{f['id']}-{f['name']}"
+                    package.writestr(location,read_blob(db.get(FileObject,f["id"])))
+                    index.append([p.code,t.title,f["name"],location,f["digest"]])
+                for e in entries:
+                    if e["kind"]=="document":
+                        location=f"task-{t.id}/documents/{e['id']}.docx"
+                        package.writestr(location,word_bytes(e["payload"],e["key"]))
+                        index.append([p.code,t.title,e["payload"]["title"],location,e["revision"]])
+            if len(checks)==1:fail(409,"本项目尚无本人可见的归档任务")
+            package.writestr("项目证据链.xlsx",write_xlsx([("材料索引",index),("完整度",checks)]))
+        tmp.seek(0);record(db,request,u,"project.evidence.export",pid);db.commit()
+    except Exception:
+        tmp.close()
+        raise
+    return StreamingResponse(file_chunks(tmp),media_type="application/zip",headers={"Content-Disposition":f'attachment; filename="project-{pid}.zip"'})
+
+def file_chunks(stream):
+    try:
+        while block:=stream.read(65536):yield block
+    finally:stream.close()
+
 def accept_blob(file):
     name=(file.filename or "").replace("\\","/").split("/")[-1].strip()
     ext=Path(name).suffix.lower()
@@ -98,9 +214,13 @@ def accept_blob(file):
 
 @router.post("/materials/upload")
 def upload(request:Request,db:DB,u:Actor,task:int=FieldValue(...),category:str=FieldValue(...,min_length=1,max_length=64),
-           file:UploadFile=File(...),project:int|None=FieldValue(None),previous:int|None=FieldValue(None)):
+           file:UploadFile=File(...),project:int|None=FieldValue(None),previous:int|None=FieldValue(None),project_code:str=FieldValue("",max_length=64)):
     t=visible_task(db,u,task,True);require_writer(db,u,t);project_for(db,t,project)
     if project is None and t.kind!="立项":fail(422,"请选择材料对应的项目")
+    codes=[p["code"] for p in t.draft.get("projects",[])]
+    if project_code and (project or t.kind!="立项" or project_code not in codes):fail(422,"材料编号须匹配当前立项清单")
+    if not project and len(codes)>1 and not project_code:fail(422,"请选择材料对应的立项编号")
+    if not project and not project_code and len(codes)==1:project_code=codes[0]
     if previous:
         old=db.get(FileObject,previous)
         if not old or old.task!=task or old.project!=project or old.category!=category:fail(422,"上一版本不属于此材料")
@@ -108,6 +228,9 @@ def upload(request:Request,db:DB,u:Actor,task:int=FieldValue(...),category:str=F
     try:
         f=FileObject(task=task,project=project,category=category,name=name,storage=key,digest=digest,size=size,previous=previous,actor=u.id)
         db.add(f);t.revision+=1;db.flush()
+        if project_code:
+            db.add(Entry(task=t.id,kind="draft_material",key=str(f.id),state="linked",actor=u.id,
+                         payload={"code":project_code,"file_id":f.id}))
         record(db,request,u,"file.upload",f.id,{"sha256":f.digest,"bytes":size})
         db.commit()
     except Exception:
@@ -187,13 +310,17 @@ def word_bytes(payload,record_no):
     t=payload.get("layout") or TEMPLATES[payload["template"]]
     d=Document();section=d.sections[0]
     section.page_width=Cm(21);section.page_height=Cm(29.7)
-    section.top_margin=Cm(3.7);section.left_margin=Cm(2.8);section.right_margin=Cm(2.6)
+    section.top_margin=Cm(3.7);section.left_margin=Cm(2.8);section.right_margin=Cm(2.6);section.bottom_margin=Cm(3.5)
     base=d.styles["Normal"];base.font.name="仿宋";base.font.size=Pt(16);base._element.rPr.rFonts.set(qn("w:eastAsia"),"仿宋")
     if t["category"]=="resolution":
         p=d.add_paragraph();p.alignment=1
         r=p.add_run(payload["values"].get("发文单位","")+"文件");r.font.color.rgb=RGBColor(200,0,0);r.bold=True;r.font.size=Pt(28)
     issue=payload.get("issuance",{})
     if issue:d.add_paragraph(issue["number"]).alignment=1
+    if t["category"]=="resolution":
+        border=OxmlElement("w:pBdr");line=OxmlElement("w:bottom")
+        for k,v in {"val":"single","sz":"12","color":"C80000","space":"4"}.items():line.set(qn("w:"+k),v)
+        border.append(line);d.paragraphs[-1]._p.get_or_add_pPr().append(border)
     p=d.add_paragraph();p.alignment=1;p.add_run(payload["title"]).bold=True
     d.add_paragraph(record_no+"　·　"+t["name"])
     for key in t["fields"]:
@@ -225,7 +352,7 @@ class IssueForm(Form):
     task:int=Field(gt=0)
     project:int|None=Field(default=None,gt=0)
     question:str=Field(min_length=1,max_length=2000)
-    due:str=Field(default="",max_length=10)
+    due:date=Field(default_factory=lambda:date.today()+timedelta(days=3))
 
 class Comment(Form):
     note:str=Field(min_length=1,max_length=2000)
@@ -234,7 +361,8 @@ class Comment(Form):
 def new_issue(form:IssueForm,request:Request,db:DB,u:Actor):
     t=visible_task(db,u,form.task,True);require_writer(db,u,t);project_for(db,t,form.project)
     if t.line!="finance":fail(422,"请从财务任务发起补件")
-    e=Entry(task=t.id,project=form.project,kind="issue",key=secrets.token_hex(10),state="open",payload=form.model_dump(),actor=u.id)
+    if form.due<date.today():fail(422,"补件期限不能早于发起日期")
+    e=Entry(task=t.id,project=form.project,kind="issue",key=secrets.token_hex(10),state="open",payload=form.model_dump(mode="json"),actor=u.id)
     db.add(e);t.revision+=1;db.flush();record(db,request,u,"issue.open",e.id);db.commit();return ok(object_info(e))
 
 @router.post("/issues/{eid}/{action}")
@@ -245,7 +373,8 @@ def issue_action(eid:int,action:Literal["reply","close"],form:Comment,request:Re
     if action=="reply" and (db.get(Department,u.department).line!="research" or e.state!="open"):fail(403,"请由科研协办人回复待补件问题")
     if action=="close" and (u.id!=e.actor or e.state!="replied"):fail(403,"由原发起人核对回复后关闭")
     e.state="replied" if action=="reply" else "closed"
-    e.payload={**e.payload,action:form.note,action+"_by":u.id}
+    from .db import now
+    e.payload={**e.payload,action:form.note,action+"_by":u.id,action+"_at":now().isoformat()}
     t.revision+=1;record(db,request,u,"issue."+action,eid);db.commit();return ok(object_info(e))
 
 @router.post("/tasks/{tid}/joint-sign")
@@ -255,6 +384,8 @@ def cosign(tid:int,form:Comment,request:Request,db:DB,u:Actor):
     line=db.get(Department,u.department).line
     if line not in {"research","finance"}:fail(403,"仅业务线可联签")
     digest=working_digest(db,t)
+    other=db.scalar(select(Entry).where(Entry.task==tid,Entry.kind=="cosign",Entry.key!=line,Entry.actor==u.id))
+    if other and other.payload.get("digest")==digest:fail(403,"两线须由不同人员确认")
     e=db.scalar(select(Entry).where(Entry.task==tid,Entry.kind=="cosign",Entry.key==line))
     if e and e.payload.get("digest")==digest:fail(409,"本线已确认当前内容")
     if not e:e=Entry(task=tid,kind="cosign",key=line,state="signed")
@@ -272,6 +403,8 @@ def archive(tid:int,request:Request,db:DB,u:Actor):
         with zipfile.ZipFile(tmp,"w",compression=zipfile.ZIP_DEFLATED) as z:
             manifest={"task":object_info(t),"archive":final,"history":[object_info(h) for h in events]}
             z.writestr("manifest.json",json.dumps(manifest,ensure_ascii=False,indent=2))
+            from .finance import write_xlsx
+            z.writestr("交付清单.xlsx",write_xlsx([("交付清单",delivery_rows(db,t,final))]))
             for meta in final["files"]:
                 f=db.get(FileObject,meta["id"]);z.writestr(f"materials/{f.id}-{f.name}",read_blob(f))
             for e in final["entries"]:
@@ -281,8 +414,4 @@ def archive(tid:int,request:Request,db:DB,u:Actor):
     except Exception:
         tmp.close()
         raise
-    def chunks():
-        try:
-            while block:=tmp.read(65536):yield block
-        finally:tmp.close()
-    return StreamingResponse(chunks(),media_type="application/zip",headers={"Content-Disposition":f'attachment; filename="task-{tid}.zip"'})
+    return StreamingResponse(file_chunks(tmp),media_type="application/zip",headers={"Content-Disposition":f'attachment; filename="task-{tid}.zip"'})

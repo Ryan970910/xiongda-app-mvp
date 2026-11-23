@@ -5,6 +5,7 @@ import {ElMessage} from 'element-plus'
 import 'element-plus/es/components/message/style/css'
 import Fields from './Fields.vue'
 import Grid from './Grid.vue'
+import TaskTable from './TaskTable.vue'
 import {useWorkspace,type Row} from './store'
 import {shown,statusName,today,keyLabel} from './forms'
 const api=useWorkspace(),router=useRouter(),route=useRoute()
@@ -14,15 +15,20 @@ const data=ref<Record<string,Row[]>>({}),detail=ref<Row|null>(null),client=ref<R
 const printLayout=ref('横向')
 const report=ref<Row|null>(null),snapshot=ref<Row|null>(null),filter=ref(''),statusFilter=ref(''),board=ref(false),tab=ref('办理')
 const popup=ref<HTMLDialogElement>(),modal=ref<Row|null>(null),form=ref<Row>({}),formError=ref(''),dirty=ref(false)
-const uploads=ref<File[]>([]),reading=ref(false),loadError=ref(''),notice=(s:string)=>ElMessage({message:s,duration:3200})
+const uploads=ref<File[]>([]),reading=ref(false),loadError=ref('')
+const notice=(message:string)=>ElMessage({message,duration:3200,grouping:true,placement:'bottom',plain:true})
+const menuOpen=ref(false),menuToggle=ref<HTMLButtonElement>()
+function leaveMenu(){menuOpen.value=false;menuToggle.value?.focus()}
 const parts=computed(()=>route.path.split('/').filter(Boolean)),page=computed(()=>parts.value[0]||'dashboard'),id=computed(()=>Number(parts.value[1])||0)
 const role=(...r:string[])=>user.value?.roles.some((x:string)=>r.includes(x))
 const manager=computed(()=>role('manager','director')),admin=computed(()=>role('admin')),reviewer=computed(()=>role('manager','director','leader'))
 const nav=computed(()=>[['dashboard','工作台','▦'],['tasks','任务中心','☷'],['customers','客户档案','▤'],['contracts','服务合同','▧'],['orders','服务订单','▤'],['projects','研发项目','◇'],['templates','文书模板','▤'],['finance','费用与物料','▥'],['risks','风险台账','△'],['archive','交付归档','▣'],['policies','政策资料','§'],['notices','办理动态','◷'],...(reviewer.value?[['statistics','办理统计','▥'],['consultations','指派给我的会审','☷']]:[]),...(manager.value?[['logs','审计日志','◷']]:[]),...(admin.value?[['admin','系统管理','⚙']]:[])])
 const title=computed(()=>nav.value.find(v=>v[0]===page.value)?.[1]||'工作台')
 const tasks=computed(()=>data.value.tasks||[]),t=computed(()=>detail.value?.task)
+const orderProjects=computed(()=>(data.value.projects||[]).filter(project=>project.order_id===t.value?.order_id))
 const self=computed(()=>user.value?.id),edit=computed(()=>t.value&&['working','revision'].includes(t.value.status)&&detail.value?.can_edit)
 const mine=(r:Row)=>(r.status==='assigned'&&r.owner===self.value)||(['working','revision'].includes(r.status)&&r.owner===self.value)||(role(r.status)&&r.dispatcher!==self.value&&r.owner!==self.value)||(['customer','complete'].includes(r.status)&&manager.value)||(r.status==='complete'&&admin.value)
+const myTasks=computed(()=>tasks.value.filter(mine))
 function urgent(r:Row){const cutoff=new Date();cutoff.setDate(cutoff.getDate()+3);return !['complete','archived','suspended'].includes(r.status)&&r.deadline<=cutoff.toLocaleDateString('sv-SE')}
 const group=(a:Row[])=>a.filter(r=>(!statusFilter.value||r.status===statusFilter.value)&&(!filter.value||JSON.stringify(r).toLowerCase().includes(filter.value.toLowerCase())))
 const visibleTasks=computed(()=>group(tasks.value).filter(r=>page.value==='archive'?r.status==='archived':parts.value[1]==='mine'?mine(r):parts.value[1]==='urgent'?urgent(r):parts.value[1]==='checking'?['leader','manager','director'].includes(r.status):parts.value[1]==='finance'?r.line==='finance':true))
@@ -35,7 +41,7 @@ function batchImport(){const kind=importKind(finTab.value);return open('批量�
 const finTab=ref('fee-collections'),sysTab=ref('users')
 const logTab=ref('login-logs')
 const financeRows=computed(()=>group(data.value[finTab.value]||[]))
-const flags=computed(()=>[['我的待办',tasks.value.filter(mine).length,'/tasks/mine'],['待审核',tasks.value.filter(r=>['leader','manager','director'].includes(r.status)).length,'/tasks/checking'],['临期与超期',tasks.value.filter(urgent).length,'/tasks/urgent'],['已归档',tasks.value.filter(r=>r.status==='archived').length,'/archive']])
+const flags=computed(()=>[['我的待办',myTasks.value.length,'/tasks/mine'],['待审核',tasks.value.filter(r=>['leader','manager','director'].includes(r.status)).length,'/tasks/checking'],['临期与超期',tasks.value.filter(urgent).length,'/tasks/urgent'],['已归档',tasks.value.filter(r=>r.status==='archived').length,'/archive']])
 const list=(a:any):Row[]=>Array.isArray(a)?a:a?.items||[]
 async function all(path:string){const one=await api.send(path+(path.includes('?')?'&':'?')+'page_size=200');if(Array.isArray(one))return one;let out=list(one);for(let p=2;out.length<one.total;p++){const next=list(await api.send(path+'?page_size=200&page='+p));if(!next.length)break;out=out.concat(next)}return out}
 let sequence=0
@@ -69,7 +75,7 @@ async function boot(){try{const [x,s]=await Promise.all([api.send('/local/status
    await load()
  }catch(e:any){error.value=e.message}finally{startup.value=false}}
 onMounted(boot)
-function reset(){user.value=null;api.clear();detail.value=null;data.value={};password.value='';again.value='';modal.value=null}
+function reset(){user.value=null;api.clear();detail.value=null;data.value={};password.value='';again.value='';modal.value=null;menuOpen.value=false}
 window.addEventListener('session-ended',()=>{reset();error.value='登录已过期，请再次登录。'})
 async function auth(){
   busy.value=true;error.value=''
@@ -140,20 +146,27 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <div v-if="startup" class="empty">正在打开工作台…</div>
 <main v-else-if="!user||user.must_change||user.password_due" class="login-wrap">
   <form class="login-paper" @submit.prevent="auth">
-    <div class="brand-line"><span class="brand-mark"><i></i><i></i><i></i></span> 科研财税协同</div>
+    <div class="login-mast">
+      <div class="brand-line"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>科研财税协同</div>
+      <span class="login-environment">{{shared?'多人试办':accounts.length||needsSetup?'本机验收':'办公室试办'}}</span>
+    </div>
+    <div class="login-fields">
     <h1>{{needsSetup?'开启本机验收':user?'更新登录密码':'登录研发服务工作台'}}</h1>
     <p class="sub">{{needsSetup?'为本机虚构案例的各岗位设置一个验收密码。之后可用同一个密码，分别体验派单、承办和审核。':user?'输入当前密码，再设置一个含字母和数字的新密码。':shared?'用分配给你的账号登录，与同事共同办理虚构订单。首次登录需要改密。':accounts.length?'选择一个岗位登录，各岗位共同办理本机保存的订单。':'输入管理员分配给你的个人账号和密码。'}}</p>
-    <label v-if="!needsSetup&&!user">账号<input v-model="username" list="account-list" autocomplete="username" required><datalist id="account-list"><option v-for="a in accounts" :value="a.username">{{a.name}}</option></datalist></label>
+    <label v-if="!needsSetup&&!user">账号<input v-model="username" :list="accounts.length?'account-list':undefined" autocomplete="username" required></label>
+    <datalist v-if="accounts.length" id="account-list"><option v-for="a in accounts" :key="a.username" :value="a.username">{{a.name}}</option></datalist>
     <label v-if="!needsSetup&&!user&&accounts.length">选择验收岗位<select v-model="username"><option v-for="a in accounts" :value="a.username">{{a.name}} · {{a.username}}</option></select></label>
     <label>{{needsSetup?'设置验收密码':user?'当前密码':'密码'}}<input type="password" v-model="password" required :autocomplete="needsSetup?'new-password':'current-password'"></label>
     <label v-if="needsSetup||user">{{needsSetup?'再输入一次':'新密码'}}<input type="password" v-model="again" required minlength="8" autocomplete="new-password"></label>
     <p v-if="needsSetup" class="sub">至少 8 位，包含字母和数字。工作资料会保存在这台电脑。</p>
-    <p v-if="error" role="alert" class="error">{{error}}</p><button class="button primary" :disabled="busy">{{busy?'处理中…':needsSetup?'建立并打开工作台':user?'保存新密码':'登录'}}</button>
+    <p v-if="error" role="alert" class="error">{{error}}</p><button class="button primary" :disabled="busy">{{busy?'处理中…':needsSetup?'建立并打开工作台':user?'保存新密码':'登录'}}<span v-if="!busy" aria-hidden="true">→</span></button>
+    </div>
   </form>
 </main>
 <div v-else class="shell">
-<aside class="sidebar" aria-label="主导航"><a class="brand" href="#/dashboard"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>科研财税协同<small>研发服务工作台</small></span></a>
-<nav id="navigation"><a v-for="[p,text,icon] in nav" :href="'#/'+p" :class="{active:page===p}" :aria-current="page===p?'page':undefined"><span aria-hidden="true">{{icon}}</span>{{text}}</a></nav>
+<aside class="sidebar" :class="{'menu-open':menuOpen}" aria-label="主导航" @keydown.esc="menuOpen&&leaveMenu()"><a class="brand" href="#/dashboard" @click="menuOpen=false"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>科研财税协同<small>研发服务工作台</small></span></a>
+<button class="menu-toggle" ref="menuToggle" type="button" aria-controls="navigation" :aria-expanded="menuOpen" @click="menuOpen=!menuOpen">{{menuOpen?'收起栏目':'全部栏目'}}<span aria-hidden="true"></span></button>
+<nav id="navigation" aria-label="工作台栏目"><a v-for="[p,text,icon] in nav" :key="p" :href="'#/'+p" :class="{active:page===p}" :aria-current="page===p?'page':undefined" @click="menuOpen&&leaveMenu()"><span aria-hidden="true">{{icon}}</span>{{text}}</a></nav>
 <div class="sandbox"><span></span><div><strong>{{shared?'多人试办环境':'本机验收环境'}}</strong><small>{{shared?'共同办理 · 虚构案例':'本机保存 · 虚构案例'}}</small></div></div></aside>
 <div class="workspace"><header class="topbar"><div class="crumb">研发服务　/　<strong>{{title}}</strong></div><div class="account"><strong>{{user.name}}</strong><select v-if="user.posts?.length>1" aria-label="当前办理部门" :value="user.department" @change="switchPost"><option v-for="dept in user.posts" :value="dept">{{data.depts?.find(d=>d.id===dept)?.name||dept}}</option></select><button class="text-link" @click="logout">退出</button></div></header>
 <main id="main">
@@ -162,12 +175,14 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <section class="hp hp-folders" aria-label="工作台与办理入口"><div class="hp-filing"><div class="hp-file-head"><h1>研发服务工作台</h1><button v-if="manager" class="button primary" @click="openResource('orders')">＋ 新建订单</button></div><p class="hp-meta"><span>{{dateLabel}}</span><i></i><span>{{user.name}}视角</span></p></div>
 <nav class="hp-steps" aria-label="研发服务流程"><a v-for="([name,sub,path],i) in [['科研立项','确认项目清单','projects'],['费用归集','关联项目与凭证','tasks/finance'],['交付归档','留存审核与确认','archive']]" :href="'#/'+path"><span class="hp-no">0{{i+1}}</span><span class="hp-copy"><strong>{{name}}</strong><small>{{sub}}</small></span><span class="hp-end">↗</span></a></nav></section>
 <div class="stats"><a v-for="[name,count,path] in flags" class="stat" :href="'#'+path"><span class="metric-label">{{name}}</span><strong class="metric">{{count}}</strong></a></div>
-<div class="content-grid"><section class="panel"><div class="panel-head"><h2>近期任务</h2><a href="#/tasks" class="text-link">全部任务 →</a></div><Grid :rows="tasks.slice(0,6)" :cols="cols.tasks"><template #default="{row}"><a :href="'#/tasks/'+row.id" class="text-link">查看 →</a></template></Grid></section>
-<aside class="stack"><section class="panel"><div class="panel-head"><h2>我的待办</h2></div><ul class="queue" v-if="tasks.some(mine)"><li v-for="r in tasks.filter(mine).slice(0,5)"><a :href="'#/tasks/'+r.id"><strong>{{r.title}}</strong><p>{{statusName(r.status)}}</p></a></li></ul><p v-else class="empty">当前岗位没有待办。</p></section><section class="panel"><div class="panel-head"><h2>{{shared?'多人试办指引':accounts.length?'本机验收指引':'办公室共同试办'}}</h2></div><p v-if="!accounts.length" class="panel-body">请以本人账号办理。承办同事接件后，派单同事刷新任务即可看到进度。</p><p v-else class="panel-body">先用科研承办账号打开青禾立项任务。填好项目清单，依次交给科研主管、科研复审经理审核，再用财务承办账号引用同一项目。</p></section></aside></div>
+<div class="content-grid"><section class="panel"><div class="panel-head"><h2>近期任务</h2><a href="#/tasks" class="text-link">全部任务 →</a></div><TaskTable :rows="tasks.slice(0,6)"/></section>
+<aside class="stack"><section class="panel my-queue"><div class="panel-head"><h2>我的待办</h2><a v-if="myTasks.length" href="#/tasks/mine" class="text-link">{{myTasks.length}} 项待办 →</a></div>
+<ul class="queue" v-if="myTasks.length"><li v-for="r in myTasks.slice(0,5)" :key="r.id"><a :href="'#/tasks/'+r.id"><strong>{{r.title}}</strong><p><span :class="['tag',r.status]">{{statusName(r.status)}}</span><span v-if="r.deadline">截止 {{r.deadline}}</span></p></a></li></ul><p v-else class="empty">当前岗位没有待办。</p></section>
+<section class="panel trial-guide"><div class="panel-head"><h2>{{shared?'多人试办指引':accounts.length?'本机验收指引':'办公室共同试办'}}</h2></div><p v-if="!accounts.length" class="panel-body">用自己的账号接件。派单同事刷新同一笔任务，就能看到最新进度。</p><p v-else class="panel-body">科研承办人先打开青禾立项任务，填写项目清单。主管和复审经理依次审核后，财务承办人即可引用同一项目。</p></section></aside></div>
 </template>
 <template v-else-if="page==='tasks'&&id&&t"><div class="page-head"><div><a href="#/tasks" class="text-link">← 任务中心</a><h1>{{t.title}}</h1><p class="sub">{{t.kind}} · {{statusName(t.status)}} · 主办 {{who(t.owner)}} · 截止 {{t.deadline}}</p></div></div>
-<div class="toolbar tabs"><button v-for="v in ['办理','文书与材料','协作与记录','审核时间线']" :class="['button',tab===v?'primary':'']" @click="tab=v">{{v}}</button></div>
-<section class="panel panel-body" v-if="tab==='办理'"><button v-if="['customer','complete','archived'].includes(t.status)" class="button" @click="download('/tasks/'+t.id+'/delivery.xlsx','交付清单.xlsx')">下载交付清单</button><h2>办理要求</h2><p>{{t.brief}}</p><h2>作业底稿</h2><p class="pre">{{t.draft.summary||'接件后可填写作业说明。'}}</p><Grid v-if="t.draft.projects?.length" :rows="t.draft.projects" :cols="cols.projects"/>
+<div class="toolbar tabs task-tabs" aria-label="任务内容"><button v-for="v in ['办理','文书与材料','协作与记录','审核时间线']" :key="v" class="button" :aria-pressed="tab===v" @click="tab=v">{{v}}</button></div>
+<section class="panel panel-body" v-if="tab==='办理'"><button v-if="['customer','complete','archived'].includes(t.status)" class="button" @click="download('/tasks/'+t.id+'/delivery.xlsx','交付清单.xlsx')">下载交付清单</button><h2>办理要求</h2><p>{{t.brief}}</p><h2>作业底稿</h2><p class="pre">{{t.draft.summary||(t.status==='assigned'?'接件后可填写作业说明。':'尚未填写作业说明。')}}</p><Grid v-if="t.draft.projects?.length" :rows="t.draft.projects" :cols="cols.projects"/>
 <div class="toolbar"><template v-if="t.status==='assigned'&&t.owner===self"><button class="button primary" @click="action('accept','确认接件')">确认接件</button><button class="button" @click="action('reject','退回派单')">退回派单</button></template>
 <button v-if="assignedButton()&&['assigned','working','revision','suspended','unassigned'].includes(t.status)" class="button" @click="open('调整协办人员','Team','/tasks/'+t.id+'/team',{revision:t.revision,assistants:detail?.assistants||[]})">调整协办人</button><button v-if="assignedButton()&&['assigned','unassigned'].includes(t.status)" class="button" @click="action('reassign','改派任务')">改派任务</button>
 <template v-if="edit"><button class="button primary" @click="draft">编辑作业底稿</button><button v-if="t.owner===self" class="button" @click="action('submit','提交审核')">提交审核</button><button class="button" @click="action('suspend','挂起任务')">挂起</button></template>
@@ -175,7 +190,7 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <template v-if="['leader','manager','director'].includes(t.status)&&role(t.status)&&detail?.can_audit"><button class="button primary" @click="action('audit','审核通过')">审核通过</button><button class="button" @click="action('audit','退回修改','return')">退回修改</button><button class="button" @click="action('audit','转会审','consult')">转会审</button></template>
 <template v-if="t.status==='customer'&&manager"><button class="button primary" @click="action('confirm','登记客户签收')">登记客户签收</button><button class="button" @click="action('confirm','客户退回','return')">客户退回</button></template>
 <button class="button primary" v-if="t.status==='complete'&&(manager||admin)" @click="action('archive','确认归档')">确认归档</button><button class="button" v-if="t.status==='archived'" @click="download('/tasks/'+t.id+'/archive.zip','任务归档.zip')">下载归档包</button></div>
-<template v-if="t.line==='finance'"><h2>同订单已通过内审的项目</h2><Grid :rows="(data.projects||[]).filter(p=>p.order_id===t.order_id)" :cols="cols.projects" empty="科研内审通过后，此处会出现可归集的项目。"/><button v-if="edit" class="button" @click="work('fee-collections','Fee','登记费用凭证')">登记费用凭证</button></template>
+<template v-if="t.line==='finance'"><h2>同订单已通过内审的项目</h2><Grid :rows="orderProjects" :cols="cols.projects" empty="请等本订单的科研立项通过内审，再登记费用凭证。"/><button v-if="edit" class="button" :disabled="!orderProjects.length" @click="work('fee-collections','Fee','登记费用凭证')">登记费用凭证</button></template>
 </section>
 <section class="panel panel-body" v-if="tab==='文书与材料'"><div v-if="edit" class="toolbar"><button class="button primary" @click="doc()">编写文书</button><button class="button" @click="newUpload">上传证明材料</button><button class="button" @click="work('achievements','Achievement','登记知识产权或成果')">登记成果</button></div><h2>文书</h2><Grid :rows="detail?.entries.filter((r:Row)=>r.kind==='document')||[]" :cols="[['title','标题'],['revision','版本']]"><template #default="{row}"><button class="text-link" v-if="edit" @click="doc(row)">编辑</button><button class="text-link" @click="download('/documents/'+row.id+'/word','工作文书.docx')">下载 Word</button><button class="text-link" @click="snapshot=row">预览与打印</button></template></Grid><h2>证明材料</h2><p v-for="item in detail?.project_evidence">{{item.code}} · 关键材料 {{item.percent}}% · {{item.missing.join('、')||'已齐备'}}</p><p v-if="detail?.evidence_check">关键材料齐备率 {{detail.evidence_check.percent}}% · {{detail.evidence_check.missing.length?'待补：'+detail.evidence_check.missing.join('、'):'已齐备'}}</p><button v-if="edit&&detail?.files?.length&&choices.project.length" class="button" @click="open('关联材料与凭证','EvidenceLink','/materials/link',{task:t.id},'post',['task'])">关联项目、环节与凭证</button><Grid :rows="detail?.files||[]" :cols="[['name','名称'],['category','类别'],['size','字节'],['previous','上一版本']]"><template #default="{row}"><button class="text-link" @click="download('/materials/'+row.id+'/download',row.name)">下载</button><button v-if="/\.(png|jpe?g)$/i.test(row.name)" class="text-link" @click="markedCopy(row)">下载带水印图片</button></template></Grid></section>
 <section class="panel panel-body" v-if="tab==='协作与记录'"><button v-if="manager&&t.kind==='立项'&&['assigned','working','revision'].includes(t.status)" class="button" @click="open('记录前置会商','Consultation','/tasks/'+t.id+'/preconsult')">记录前置会商</button><div v-if="edit" class="toolbar"><button class="button" @click="work('collections','Note','收件、会商与跟进')">收件、会商与跟进</button><button v-if="t.line==='finance'" class="button" @click="work('issues','IssueForm','发起补件')">发起补件</button><button v-if="t.kind==='调整'" class="button" @click="work('adjustments','Adjustment','申请项目调整')">申请项目调整</button><button v-if="t.kind==='结题'" class="button" @click="work('settlements','Settlement','核对项目决算与验收指标')">登记结题验收</button><button v-if="t.kind==='结题'||t.line==='finance'" class="button" @click="open('确认本线核对意见','Comment','/tasks/'+t.id+'/joint-sign')">{{t.kind==='结题'?'本线结题联签':'本线资料联审'}}</button></div>
@@ -191,7 +206,7 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <div v-if="page==='finance'" class="toolbar tabs"><button v-for="([name],k) in financeKinds" :class="['button',finTab===k?'primary':'']" @click="finTab=k">{{name}}</button></div>
 <div v-if="page==='admin'&&admin" class="toolbar tabs"><button v-for="[k,label] in [['users','账号与岗位'],['depts','组织部门'],['login-logs','登录日志'],['operation-logs','操作日志'],['risk-rules','合规规则版本']]" class="button" @click="sysTab=k">{{label}}</button><button v-if="sysTab==='risk-rules'" class="button primary" @click="open('发布合规规则','RiskRule','/system/risk-rules')">发布合规规则</button><button class="button" @click="configureRouting">审核层级规则</button><button class="button" @click="open('发布模板版本','TemplateChange','/system/template-versions')">维护模板</button><button v-if="sysTab==='depts'" class="button primary" @click="open('新建部门','Org','/system/depts')">新建部门</button></div>
 <div class="toolbar filters"><input v-model="filter" aria-label="检索" placeholder="输入名称、编号或关键词"><template v-if="page==='tasks'"><select v-model="statusFilter" aria-label="任务状态"><option value="">全部状态</option><option v-for="s in [...new Set(tasks.map(x=>x.status))]" :value="s">{{statusName(s)}}</option></select><button class="button" @click="board=!board">{{board?'列表视图':'看板视图'}}</button></template></div>
-<section v-if="['tasks','archive'].includes(page)" class="panel"><div v-if="board&&page==='tasks'" class="board"><div v-for="s in [...new Set(visibleTasks.map(x=>x.status))]"><h2>{{statusName(s)}}</h2><a v-for="r in visibleTasks.filter(x=>x.status===s)" class="board-task" :href="'#/tasks/'+r.id">{{r.title}}<small>{{r.deadline}}</small></a></div></div><Grid v-else :rows="visibleTasks" :cols="cols.tasks"><template #default="{row}"><a class="text-link" :href="'#/tasks/'+row.id">查看 →</a></template></Grid></section>
+<section v-if="['tasks','archive'].includes(page)" class="panel"><div v-if="board&&page==='tasks'" class="board"><div v-for="s in [...new Set(visibleTasks.map(x=>x.status))]"><h2>{{statusName(s)}}</h2><a v-for="r in visibleTasks.filter(x=>x.status===s)" class="board-task" :href="'#/tasks/'+r.id">{{r.title}}<small>{{r.deadline}}</small></a></div></div><TaskTable v-else :rows="visibleTasks"/></section>
 <section v-else-if="page==='finance'" class="panel panel-body"><div class="toolbar"><button v-if="financeKinds[finTab][1]&&role('staff','leader')" class="button primary" @click="work(finTab,financeKinds[finTab][1],'登记'+financeKinds[finTab][0])">＋ 登记</button><button v-if="importKind(finTab)&&role('staff','leader')" class="button" @click="batchImport">批量导入</button><button v-if="manager" class="button" @click="open('年度费用辅助账','Ledger','/subsidiary/generate',{year:new Date().getFullYear()})">生成年度辅助账</button></div>
 <Grid :rows="financeRows" :cols="[['key','单号'],['person','人员'],['project','项目'],[finTab==='material-ledger'?'balance':finTab==='fee-collections'?'amount':finTab==='workhours'?'hours':'state','金额 / 数量 / 状态']]"><template #default="{row}"><button class="text-link" @click="snapshot=row">明细</button><button v-if="finTab==='attendance'&&row.state!=='allocated'&&role('staff','leader')" class="text-link" @click="open('按已审工时分摊','Allocate','/attendance/allocate',{attendance:row.id,task:row.task},'post',['task','attendance'])">分摊工资</button><button v-if="['workhours','trials'].includes(finTab)&&reviewer&&row.actor!==self&&row.state==='draft'" class="text-link" @click="open('单据审核','Review','/'+finTab+'/audit',{id:row.id},'post',['id'])">审核</button></template></Grid>
 <div v-if="report"><h2>{{report.customer}} · {{report.year}} 年费用复核</h2><Grid :rows="report.projects" :cols="[['code','项目'],['account','会计'],['hightech','高企'],['deduction','加计归集']]"/><p>本年加计额 {{report.mapping['51']}} 元 · 产品材料结转 {{report.mapping['52']}} 元</p><p v-for="(v,k) in report.checks">{{k}} · {{v?'通过':'待复核'}}</p><p v-for="m in report.warnings">{{m}}</p><label>账表打印方向 <select v-model="printLayout"><option>横向</option><option>纵向</option></select></label><div class="toolbar"><button v-for="[key,label] in [['account','会计口径'],['hightech','高企口径'],['deduction','加计口径'],['differences','差异调节']]" class="button" @click="download('/subsidiary?'+query(report.params)+'&view='+key,label+'.xlsx')">{{label}}表</button></div><button class="button" @click="download('/subsidiary?'+query(report.params),'年度费用.xlsx')">下载 Excel 工作簿</button> <button class="button" @click="download('/subsidiary?'+query(report.params)+'&filing=true','申报核对.xlsx')">导出申报核对表</button></div></section>

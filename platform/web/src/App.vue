@@ -15,11 +15,13 @@ const data=ref<Record<string,Row[]>>({}),detail=ref<Row|null>(null),client=ref<R
 const printLayout=ref('横向')
 const report=ref<Row|null>(null),snapshot=ref<Row|null>(null),filter=ref(''),statusFilter=ref(''),board=ref(false),tab=ref('办理')
 const popup=ref<HTMLDialogElement>(),modal=ref<Row|null>(null),form=ref<Row>({}),formError=ref(''),dirty=ref(false)
+const templateDialog=ref<HTMLDialogElement>(),preview=ref<Row|null>(null)
 const uploads=ref<File[]>([]),reading=ref(false),loadError=ref('')
 const notice=(message:string)=>ElMessage({message,duration:3200,grouping:true,placement:'bottom',plain:true})
 const menuOpen=ref(false),menuToggle=ref<HTMLButtonElement>()
 function leaveMenu(){menuOpen.value=false;menuToggle.value?.focus()}
 const parts=computed(()=>route.path.split('/').filter(Boolean)),page=computed(()=>parts.value[0]||'dashboard'),id=computed(()=>Number(parts.value[1])||0)
+const inLibrary=computed(()=>page.value==='policies'&&parts.value[1]==='library')
 const role=(...r:string[])=>user.value?.roles.some((x:string)=>r.includes(x))
 const manager=computed(()=>role('manager','director')),admin=computed(()=>role('admin')),reviewer=computed(()=>role('manager','director','leader'))
 const nav=computed(()=>[['dashboard','工作台','▦'],['tasks','任务中心','☷'],['customers','客户档案','▤'],['contracts','服务合同','▧'],['orders','服务订单','▤'],['projects','研发项目','◇'],['templates','文书模板','▤'],['finance','费用与物料','▥'],['risks','风险台账','△'],['archive','交付归档','▣'],['policies','政策资料','§'],['notices','办理动态','◷'],...(reviewer.value?[['statistics','办理统计','▥'],['consultations','指派给我的会审','☷']]:[]),...(manager.value?[['logs','审计日志','◷']]:[]),...(admin.value?[['admin','系统管理','⚙']]:[])])
@@ -59,7 +61,10 @@ async function load(){
     if(section==='statistics')urls.statistics='/management/stats'
     if(section==='notices')urls.notices='/notices'
     if(section==='risks')urls.risks='/risks'
-    if(section==='policies')urls.policies='/policies'
+    if(section==='policies'){
+      if(inLibrary.value)urls.library='/policies/library'
+      else urls.policies='/policies'
+    }
     if(section==='admin'&&admin.value)urls[sysTab.value]='/system/'+sysTab.value
     const [records,d,c]=await Promise.all([Promise.all(Object.entries(urls).map(async([k,v])=>[k,await all(v)])),section==='tasks'&&record?api.send('/tasks/'+record):null,section==='customers'&&record?api.send('/customers/'+record):null])
     if(seq!==sequence)return
@@ -69,6 +74,12 @@ async function load(){
 }
 watch(()=>[route.path,finTab.value,sysTab.value,logTab.value],()=>{filter.value='';statusFilter.value='';tab.value='办理';snapshot.value=null;report.value=null;load()})
 function go(p:string){router.push(p.startsWith('/')?p:'/'+p)}
+async function showTemplate(row:Row){
+  preview.value=row
+  await nextTick()
+  templateDialog.value?.showModal()
+}
+watch([()=>route.path,user],()=>templateDialog.value?.close())
 async function boot(){try{const [x,s]=await Promise.all([api.send('/local/status'),fetch('/api/openapi.json').then(r=>r.json())]);shared.value=!!x.shared;accounts.value=x.accounts;if(!x.accounts.length)username.value='';needsSetup.value=x.setup;schemas.value=s.components.schemas
    const fragment=location.hash.replace(/^#\/?/,'').split('/');if(fragment[0]==='first'){ticket.value=fragment[1]||'';await router.replace('/dashboard')}
    if(api.get())user.value=await api.send('/auth/me')
@@ -111,7 +122,7 @@ async function save(){
  if(!modal.value||busy.value)return;busy.value=true;formError.value=''
  try{const m=modal.value,v={...form.value}
    if(m.mode==='import'){if(!uploads.value[0])throw Error('请选择导入文件');const fd=new FormData();fd.append('file',uploads.value[0]);fd.append('task',v.task);const result=await api.send(m.path,'post',fd);notice('已导入 '+result.count+' 行')}
-   else if(['upload','customer-upload'].includes(m.mode)){if(!uploads.value.length)throw Error('请选择文件');while(uploads.value.length){const f=uploads.value[0];const fd=new FormData();for(const [k,x] of Object.entries(v))if(x!=null&&x!=='')fd.set(k,String(x));fd.append('file',f);await api.send(m.path,'post',fd);uploads.value=uploads.value.slice(1)}}
+   else if(['upload','customer-upload','library-upload'].includes(m.mode)){if(!uploads.value.length)throw Error('请选择文件');while(uploads.value.length){const f=uploads.value[0];const fd=new FormData();for(const [k,x] of Object.entries(v))if(x!=null&&x!=='')fd.set(k,String(x));fd.append('file',f);await api.send(m.path,'post',fd);uploads.value=uploads.value.slice(1)}}
    else{if(m.mode==='document'){v.values=Object.fromEntries((template.value?.fields||[]).map((k:string)=>[k,v.values[k]||'']))}
     const res=await api.send(m.path,m.method,v);if(m.path==='/subsidiary/generate')report.value={...res,params:{...v,snapshot:res.snapshot_id}}}
    close(true);notice('已保存');await load()
@@ -201,7 +212,14 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <template v-else><div class="page-head"><div><h1>{{title}}</h1></div><div class="toolbar">
 <button v-if="(manager&&['customers','orders'].includes(page)||role('admin','manager')&&page==='contracts')||assignedButton()&&page==='tasks'" class="button primary" @click="openResource(page)">{{page==='tasks'?'＋ 新建派单':'＋ 新建'}}</button>
 <button class="button" v-if="page==='tasks'&&assignedButton()" @click="open('批量派单','BatchDispatch','/dispatch/batch')">批量派单</button><button class="button primary" v-if="page==='admin'&&sysTab==='users'&&admin" @click="editAccount()">开设账号</button><button v-if="page==='admin'&&sysTab==='users'&&admin" class="button" @click="download('/system/account-register.xlsx','账号岗位台账.xlsx')">导出岗位台账</button>
-<button class="button" v-if="page==='policies'&&admin" @click="open('发布政策版本','PolicyData','/policies')">发布政策版本</button></div></div>
+<template v-if="page==='policies'&&admin">
+  <button v-if="inLibrary" class="button primary" @click="open('上传模板','','/policies/library',{description:''},'post',[],'library-upload')">上传模板</button>
+  <button v-else class="button" @click="open('发布政策版本','PolicyData','/policies')">发布政策版本</button>
+</template></div></div>
+<div v-if="page==='policies'" class="toolbar task-tabs" role="group" aria-label="政策资料栏目">
+  <button class="button" :aria-pressed="!inLibrary" @click="go('/policies')">政策文件</button>
+  <button class="button" :aria-pressed="inLibrary" @click="go('/policies/library')">模板库</button>
+</div>
 <div v-if="page==='logs'" class="toolbar tabs"><button class="button" @click="logTab='login-logs'">登录日志</button><button class="button" @click="logTab='operation-logs'">操作日志</button></div>
 <div v-if="page==='finance'" class="toolbar tabs"><button v-for="([name],k) in financeKinds" :class="['button',finTab===k?'primary':'']" @click="finTab=k">{{name}}</button></div>
 <div v-if="page==='admin'&&admin" class="toolbar tabs"><button v-for="[k,label] in [['users','账号与岗位'],['depts','组织部门'],['login-logs','登录日志'],['operation-logs','操作日志'],['risk-rules','合规规则版本']]" class="button" @click="sysTab=k">{{label}}</button><button v-if="sysTab==='risk-rules'" class="button primary" @click="open('发布合规规则','RiskRule','/system/risk-rules')">发布合规规则</button><button class="button" @click="configureRouting">审核层级规则</button><button class="button" @click="open('发布模板版本','TemplateChange','/system/template-versions')">维护模板</button><button v-if="sysTab==='depts'" class="button primary" @click="open('新建部门','Org','/system/depts')">新建部门</button></div>
@@ -212,6 +230,16 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <div v-if="report"><h2>{{report.customer}} · {{report.year}} 年费用复核</h2><Grid :rows="report.projects" :cols="[['code','项目'],['account','会计'],['hightech','高企'],['deduction','加计归集']]"/><p>本年加计额 {{report.mapping['51']}} 元 · 产品材料结转 {{report.mapping['52']}} 元</p><p v-for="(v,k) in report.checks">{{k}} · {{v?'通过':'待复核'}}</p><p v-for="m in report.warnings">{{m}}</p><label>账表打印方向 <select v-model="printLayout"><option>横向</option><option>纵向</option></select></label><div class="toolbar"><button v-for="[key,label] in [['account','会计口径'],['hightech','高企口径'],['deduction','加计口径'],['differences','差异调节']]" class="button" @click="download('/subsidiary?'+query(report.params)+'&view='+key,label+'.xlsx')">{{label}}表</button></div><button class="button" @click="download('/subsidiary?'+query(report.params),'年度费用.xlsx')">下载 Excel 工作簿</button> <button class="button" @click="download('/subsidiary?'+query(report.params)+'&filing=true','申报核对.xlsx')">导出申报核对表</button></div></section>
 <section v-else-if="page==='admin'&&admin" class="panel"><Grid :rows="group(data[sysTab]||[])" :cols="sysTab==='users'?cols.admin:sysTab==='depts'?[['name','部门'],['line','业务线']]:sysTab==='risk-rules'?[['code','编号'],['name','规则'],['effective','生效日期'],['severity','级别'],['reference','政策依据']]: [['at','时间 UTC'],['actor','操作人'],['action','动作'],['subject','对象'],['ip','地址']]"><template #default="{row}"><button v-if="sysTab==='risk-rules'" class="text-link" @click="open('修订或停用规则','RiskRule','/system/risk-rules',Object.fromEntries(Object.keys(schemas.RiskRule.properties).filter(k=>k in row).map(k=>[k,row[k]])))">修订或停用</button><template v-if="sysTab==='users'"><button class="text-link" @click="editAccount(row)">编辑</button><button class="text-link" @click="open('重置临时密码','Password','/system/users/'+row.id+'/reset-password')">重置密码</button><button class="text-link" v-if="row.enabled&&row.id!==self" @click="disable(row)">停用</button></template></template></Grid></section>
 <section v-else-if="page==='logs'&&manager" class="panel"><Grid :rows="group(data.logs||[])" :cols="[['at','时间 UTC'],['actor','人员编号'],['action','动作'],['subject','对象'],['ip','地址']]"/></section>
+<section v-else-if="page==='templates'" class="panel">
+  <Grid :rows="group(data.templates||[])" :cols="cols.templates">
+    <template #default="{row}"><button class="text-link" @click="showTemplate(row)">查看</button></template>
+  </Grid>
+</section>
+<section v-else-if="inLibrary" class="panel">
+  <Grid :rows="group(data.library||[])" :cols="[['name','模板文件'],['description','用途说明']]" :empty="filter?'没有匹配的模板。':reading?'正在读取模板…':admin?'模板库还没有文件。点击「上传模板」添加第一份模板。':'管理员上传的模板会显示在这里。'">
+    <template #default="{row}"><button class="text-link" @click="download('/policies/library/'+row.id+'/download',row.name)">下载</button></template>
+  </Grid>
+</section>
 <section v-else-if="page==='consultations'&&reviewer" class="panel"><Grid :rows="group(data.consultations||[])" :cols="[['title','任务'],['question','会审事项'],['state','状态'],['reply','会审意见']]"><template #default="{row}"><button v-if="row.state==='open'" class="text-link" @click="open('提交会审意见','Comment','/consultations/'+row.id+'/reply')">回复</button></template></Grid></section>
 <section v-else-if="cols[page]" class="panel"><Grid :rows="group(data[page]||[])" :cols="cols[page]"><template #default="{row}"><a class="text-link" v-if="page==='customers'" :href="'#/customers/'+row.id">客户全景 →</a><a class="text-link" v-else-if="['risks','notices'].includes(page)" :href="'#/tasks/'+row.task">前往处理 →</a><button v-else class="text-link" @click="snapshot=row">查看</button><button v-if="page==='projects'" class="text-link" @click="download('/projects/'+row.id+'/evidence.zip','项目备查档案.zip')">项目备查档案</button><button class="text-link" v-if="(role('admin','manager')&&page==='contracts'||manager&&page==='orders')" @click="openResource(page,row)">编辑</button><button v-if="page==='contracts'&&role('director')&&row.status==='draft'" class="text-link" @click="open('审核合同','Decision','/contracts/'+row.id+'/approve',{revision:row.revision},'post',['owner','consultant','result','version'])">审核</button></template></Grid></section>
 </template>
@@ -219,10 +247,24 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <template v-else-if="snapshot.snapshot"><p>提交版本 {{snapshot.version}} · {{snapshot.snapshot.draft.summary}}</p><Grid :cols="cols.projects" :rows="snapshot.snapshot.draft.projects||[]"/><h3>当时的业务记录</h3><Grid :rows="snapshot.snapshot.entries||[]" :cols="[['key','单号'],['kind','类别'],['state','状态']]"/><h3>当时的证明文件</h3><Grid :rows="snapshot.snapshot.files||[]" :cols="[['name','材料'],['digest','文件指纹']]"/></template>
 <template v-else><dl><template v-for="[k,v] in namedFields({...snapshot,...snapshot.details,...snapshot.payload})"><dt>{{keyLabel(k)}}</dt><dd>{{shown(v)}}</dd></template></dl><div v-if="snapshot.payload?.recalculation"><h3>调整后复算</h3><p>已归集 {{snapshot.payload.recalculation.amount}} 元，剩余预算 {{snapshot.payload.recalculation.remaining}} 元。</p><p>已更新底稿 {{snapshot.payload.recalculation.updated_drafts.join('、')||'无'}}；超出新周期 {{snapshot.payload.recalculation.outside_period.join('、')||'无'}}。</p></div><p v-if="snapshot.fields">{{snapshot.fields.join(' · ')}}</p></template></section>
 </main></div></div>
+<dialog ref="templateDialog" aria-labelledby="template-preview-title" @close="preview=null">
+  <template v-if="preview">
+    <div class="panel-head"><h2 id="template-preview-title">{{preview.name}}</h2><button class="button" autofocus @click="templateDialog?.close()">关闭</button></div>
+    <div class="panel-body template-preview">
+      <p class="sub">{{preview.kind}}</p>
+      <h3>适用情形</h3><p>{{preview.scenario}}</p>
+      <h3>填写栏目</h3><ol><li v-for="field in preview.fields" :key="field">{{field}}</li></ol>
+    </div>
+  </template>
+</dialog>
 <dialog ref="popup" v-if="modal" aria-labelledby="modal-title" @cancel.prevent="close()"><form @submit.prevent="save" @input="dirty=true" @change="dirty=true"><div class="panel-head"><h2 id="modal-title">{{modal.title}}</h2><button type="button" class="button" @click="close()">关闭</button></div><div class="panel-body">
 <template v-if="modal.mode==='document'"><label>选择模板<select v-model="form.template" @change="form.values={}"><option v-for="s in data.templates" :value="s.id">{{s.kind}} · {{s.name}}</option></select></label></template>
 <div v-if="modal.mode==='import'" class="field-grid"><button type="button" class="button" @click="download(modal.path+'/template','导入模板.xlsx')">下载空白模板</button><label>财务任务<select v-model="form.task" required><option value="">请选择</option><option v-for="o in choices.task" :value="o.id">{{o.name}}</option></select></label><label class="wide">选择填好的 XLSX 或 CSV<input type="file" accept=".xlsx,.csv" required @change="uploads=Array.from(($event.target as HTMLInputElement).files||[])"></label></div>
 <Fields :schema="modal.schema" :schemas="schemas" :model="form" :choices="choices" :hidden="modal.hidden"/>
+<div v-if="modal.mode==='library-upload'" class="field-grid">
+  <label class="wide">模板文件<input type="file" required accept=".docx,.xlsx,.pdf,.jpg,.jpeg,.png" @change="uploads=Array.from(($event.target as HTMLInputElement).files||[])"><small>支持 Word（.docx）、Excel（.xlsx）、PDF、JPG 和 PNG，单个文件最多 20 MB。</small></label>
+  <label class="wide">用途说明（选填）<textarea v-model="form.description" rows="2" maxlength="500"></textarea></label>
+</div>
 <div v-if="modal.mode==='document'" class="field-grid"><label v-for="k in template?.fields">{{k}} *<textarea v-model="form.values[k]" required rows="2" maxlength="10000"></textarea></label></div>
 <div v-if="['upload','customer-upload'].includes(modal.mode)" class="field-grid"><template v-if="modal.mode==='customer-upload'"><label>关联合同<select v-model="form.contract"><option value="">客户基础资料</option><option v-for="c in client?.contracts" :value="c.id">{{c.name}}</option></select></label><label>可见范围<select v-model="form.clearance"><option>管理岗可见</option><option>任务可见</option></select></label></template><label v-else>项目<select v-model="form.project" :required="t.kind!=='立项'"><option value="">立项阶段待建项目</option><option v-for="p in choices.project" :value="p.id">{{p.name}}</option></select></label><label v-if="modal.mode==='upload'&&t.kind==='立项'&&!form.project&&t.draft.projects?.length">立项清单编号<select v-model="form.project_code" :required="t.draft.projects.length>1"><option value="">单项目自动匹配</option><option v-for="p in t.draft.projects" :value="p.code">{{p.code}} · {{p.name}}</option></select></label><label>材料类别<input v-model="form.category" required></label><label>替换旧版本<select v-model="form.previous"><option value="">新材料</option><option v-for="f in (modal.mode==='customer-upload'?data.clientfiles:detail?.files)" :value="f.id">{{f.name}}</option></select></label><label>用手机拍照<input type="file" accept="image/jpeg,image/png" capture="environment" @change="uploads=Array.from(($event.target as HTMLInputElement).files||[])"></label><small v-if="uploads.length">已选 {{uploads.map(f=>f.name).join('、')}}</small><label class="wide" @dragover.prevent @drop.prevent="uploads=Array.from($event.dataTransfer?.files||[]);dirty=true">选择或拖入文件（可多选，每个最多 20 MB）<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx" @change="uploads=Array.from(($event.target as HTMLInputElement).files||[])"></label></div>
 <p v-if="formError" role="alert" class="error">{{formError}}</p><div class="toolbar"><button class="button primary" :disabled="busy">{{busy?'保存中…':'确认并保存'}}</button></div></div></form></dialog>

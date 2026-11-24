@@ -43,6 +43,18 @@ def run(client):
     assert call(None,"GET","/local/status")["setup"]
     call(None,"POST","/local/setup",{"ticket":os.environ["ACCEPTANCE_TICKET"],"password":pwd})
     for n,_,_,_ in ACCOUNTS:login(n)
+    library = "/policies/library"
+    template_bytes = b"%PDF-1.4\nshared template\n%%EOF"
+    template_upload = {"file": ("填报说明.pdf", template_bytes, "application/pdf")}
+    call(None, "GET", library, expected=401)
+    call("research", "POST", library, expected=403, files=template_upload)
+    call("admin", "POST", library, expected=422, files={"file": ("假文件.docx", b"invalid")})
+    saved = call("admin", "POST", library, files=template_upload, data={"description": "年度填报"})
+    assert call("research", "GET", library) == [
+        {"id": saved["id"], "name": "填报说明.pdf", "description": "年度填报", "size": len(template_bytes)}]
+    file_url = f"{library}/{saved['id']}/download"
+    call(None, "GET", file_url, expected=401)
+    assert call("research", "GET", file_url) == template_bytes
     people={p["name"]:p["id"] for p in call("dispatch","GET","/directory")}
     a=call("admin","POST","/system/users",{"username":"independent","name":"另一位承办","employee_no":"T-10","department":2,"team":"独立组","roles":[{"role":"staff"}],"new_password":pwd})
     login("independent");call("independent","GET","/tasks",expected=403)
@@ -231,6 +243,8 @@ def run(client):
             assert conn.execute("select count(*) from sys_session").fetchone()[0]==0
             assert conn.execute("select status from wf_task where id=?",(rid,)).fetchone()[0]=="archived"
             assert list((restored/"objects").iterdir())
+            template_key = conn.execute("select storage from policy_template_file where id=?", (saved["id"],)).fetchone()[0]
+            assert (restored/"objects"/template_key).read_bytes() == template_bytes
         finally:conn.close()
     os.environ["OFFICE_MODE"]="1"
     try:

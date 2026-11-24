@@ -25,7 +25,10 @@ def backup(source, target):
             snapshot.execute("PRAGMA foreign_keys=ON")
             snapshot.execute("DELETE FROM sys_session")
             snapshot.commit()
-            rows = snapshot.execute("SELECT storage,digest FROM doc_material UNION SELECT storage,digest FROM biz_customer_file")
+            files = "SELECT storage,digest FROM doc_material UNION SELECT storage,digest FROM biz_customer_file"
+            if snapshot.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='policy_template_file'").fetchone():
+                files += " UNION SELECT storage,digest FROM policy_template_file"
+            rows = snapshot.execute(files)
             for key, digest in rows:
                 if Path(key).name != key or key in {".", ".."}:
                     raise ValueError("无效的附件索引")

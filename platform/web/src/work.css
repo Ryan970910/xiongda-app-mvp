@@ -129,3 +129,7 @@
 @media (prefers-reduced-motion: reduce) {
   .hp-folders .hp-steps a { transition: none; }
 }
+.template-preview { overflow-wrap: anywhere; }
+.template-preview h3 { margin: 18px 0 6px; font-size: 15px; }
+.template-preview p { margin: 0; }
+.template-preview ol { padding-left: 1.7em; line-height: 1.9; margin: 4px 0 0; }

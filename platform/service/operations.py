@@ -353,6 +353,54 @@ from .db import now
 from .auth import roles
 from .materials import accept_blob,read_blob,drop_blob
 
+class PolicyTemplateFile(Base):
+    __tablename__ = "policy_template_file"
+    id = Column(ID, primary_key=True)
+    name = Column(String(160), nullable=False)
+    description = Column(String(500), nullable=False, default="")
+    storage = Column(String(160), unique=True, nullable=False)
+    digest = Column(String(64), nullable=False)
+    size = Column(Integer, nullable=False)
+    actor = Column(ID, ForeignKey("sys_user.id"), nullable=False)
+
+
+@router.get("/policies/library")
+def template_library(db: DB, u: Actor):
+    rows = db.scalars(select(PolicyTemplateFile).order_by(PolicyTemplateFile.id.desc()))
+    return ok([{"id": row.id, "name": row.name, "description": row.description, "size": row.size}
+               for row in rows])
+
+
+@router.post("/policies/library")
+def upload_policy_template(request: Request, db: DB, u: Actor, file: UploadFile = File(...),
+                           description: str = UploadField("", max_length=500)):
+    require(u, "admin")
+    name, key, digest, size = accept_blob(file)
+    try:
+        item = PolicyTemplateFile(name=name, description=description.strip(), storage=key,
+                                  digest=digest, size=size, actor=u.id)
+        db.add(item)
+        db.flush()
+        record(db, request, u, "policy-template.upload", item.id, {"sha256": digest})
+        db.commit()
+    except Exception:
+        db.rollback()
+        drop_blob(key)
+        raise
+    return ok({"id": item.id})
+
+
+@router.get("/policies/library/{file_id}/download")
+def download_policy_template(file_id: int, request: Request, db: DB, u: Actor):
+    item = db.get(PolicyTemplateFile, file_id)
+    if not item:
+        fail(404, "模板文件不存在")
+    data = read_blob(item)
+    record(db, request, u, "policy-template.download", item.id)
+    db.commit()
+    return deliver(data, item.name, "application/octet-stream")
+
+
 class CustomerFile(Base):
     __tablename__="biz_customer_file"
     id=Column(ID,primary_key=True)

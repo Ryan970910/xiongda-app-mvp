@@ -6,6 +6,7 @@ import 'element-plus/es/components/message/style/css'
 import Fields from './Fields.vue'
 import Grid from './Grid.vue'
 import TaskTable from './TaskTable.vue'
+import ProjectWriting from './ProjectWriting.vue'
 import {useWorkspace,type Row} from './store'
 import {shown,statusName,today,keyLabel} from './forms'
 const api=useWorkspace(),router=useRouter(),route=useRoute()
@@ -72,7 +73,7 @@ async function load(){
     if(c&&manager.value){const pay=await api.send('/receipts?customer='+record);if(seq===sequence)receipts.value=pay}
   }catch(e:any){if(seq===sequence)loadError.value=e.message}finally{if(seq===sequence)reading.value=false}
 }
-watch(()=>[route.path,finTab.value,sysTab.value,logTab.value],()=>{filter.value='';statusFilter.value='';tab.value='办理';snapshot.value=null;report.value=null;load()})
+watch(()=>[route.fullPath,finTab.value,sysTab.value,logTab.value],()=>{filter.value='';statusFilter.value='';tab.value=page.value==='tasks'&&route.query.tab==='documents'?'文书与材料':'办理';snapshot.value=null;report.value=null;load()})
 function go(p:string){router.push(p.startsWith('/')?p:'/'+p)}
 async function showTemplate(row:Row){
   preview.value=row
@@ -115,8 +116,9 @@ function openResource(k:string,r?:Row){const types:Record<string,string>={custom
 function action(code:string,text:string,result='pass'){const row=t.value;return open(text,'Decision','/tasks/'+row.id+'/'+code,{revision:row.revision,version:row.version,result},'post',['revision','version','result',...(code==='reassign'?[]:['owner']),...(result==='consult'?[]:['consultant'])])}
 function draft(){const row=t.value;open('编辑作业底稿','Draft','/tasks/'+row.id+'/draft',{revision:row.revision,summary:row.draft.summary||'',projects:row.draft.projects||[]},'put',row.kind==='立项'?[]:['projects'])}
 function work(kind:string,schema:string,title:string){open(title,schema,'/'+kind,{...(t.value?{task:t.value.id}:{}),...(schemas.value[schema]?.properties?.key?{key:crypto.randomUUID().slice(0,12)}:{})},'post',t.value?['task']:[])}
-function doc(r?:Row){const template=r?.payload.template||data.value.templates?.[0]?.id;open(r?'编辑文书':'选模板编写文书','DocumentForm','/documents'+(r?'/'+r.id:''),{task:t.value.id,project:r?.project,template,title:r?.payload.title||'',values:{...r?.payload.values},revision:r?.revision},r?'put':'post',['task','template','values'],'document')}
-const template=computed(()=>data.value.templates?.find(x=>x.id===form.value.template))
+const savedOutline=ref<Row|null>(null)
+function doc(r?:Row){savedOutline.value=r?.payload.layout||null;const template=r?.payload.template||data.value.templates?.[0]?.id;open(r?'编辑文书':'选模板编写文书','DocumentForm','/documents'+(r?'/'+r.id:''),{task:t.value.id,project:r?.project,template,title:r?.payload.title||'',values:{...r?.payload.values},revision:r?.revision},r?'put':'post',['task','template','values'],'document')}
+const template=computed(()=>savedOutline.value&&savedOutline.value.id===form.value.template?savedOutline.value:data.value.templates?.find(x=>x.id===form.value.template))
 function newUpload(){open('上传证明材料','','/materials/upload',{task:t.value.id,category:'实验记录',project:''},'post',[],'upload')}
 async function save(){
  if(!modal.value||busy.value)return;busy.value=true;formError.value=''
@@ -209,6 +211,7 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
 <section v-if="tab==='审核时间线'" class="panel panel-body"><h2>审核与版本</h2><p v-if="detail?.review_clock">本环节限时 {{detail.review_clock.hours}} 小时 · 截止 {{detail.review_clock.due.replace('T',' ').slice(0,16)}} UTC · {{detail.review_clock.overdue?'审核超期':'办理中'}}</p><ol class="history-list"><li v-for="h in detail?.history"><strong>{{shown(h.action)}}</strong> · {{who(h.actor)}} · {{h.at.replace('T',' ').slice(0,19)}} UTC<p>{{h.note}}</p><button v-if="h.snapshot?.draft" class="text-link" @click="snapshot=h">查看第 {{h.version}} 版</button></li></ol></section>
 </template>
 <template v-else-if="page==='customers'&&id&&client"><div class="page-head"><div><a href="#/customers" class="text-link">← 客户档案</a><h1>{{client.customer.name}}</h1><p class="sub">{{client.customer.code}} · {{client.customer.details.level}}</p></div><button class="button" @click="download('/customers/'+id+'/service-file.xlsx','客户服务档案.xlsx')">导出服务档案</button><button v-if="manager" class="button" @click="openResource('customers',client.customer)">编辑档案</button></div><div class="stack"><section v-for="k in ['contracts','orders','tasks','projects']" class="panel"><div class="panel-head"><h2>{{nav.find(v=>v[0]===k)?.[1]}}</h2></div><Grid :cols="cols[k]" :rows="client[k]"><template v-if="k==='tasks'" #default="{row}"><a class="text-link" :href="'#/tasks/'+row.id">查看 →</a></template></Grid></section><section class="panel"><div class="panel-head"><h2>客户与合同附件</h2><button v-if="manager" class="text-link" @click="open('登记客户或合同附件','','/customers/'+id+'/files',{category:'营业执照',clearance:'管理岗可见'},'post',[],'customer-upload')">上传附件</button></div><Grid :rows="data.clientfiles||[]" :cols="[['name','文件'],['category','分类'],['clearance','可见岗位']]"> <template #default="{row}"><button class="text-link" @click="download('/customers/'+id+'/files/'+row.id,row.name)">下载</button></template></Grid></section><section v-if="manager" class="panel"><div class="panel-head"><h2>回款记录</h2><button class="text-link" @click="work('receipts','Payment','登记合同回款')">登记回款</button></div><Grid :rows="receipts" :cols="[['reference','流水号'],['day','到账日期'],['amount','金额（元）']]"/></section></div></template>
+<ProjectWriting v-else-if="page==='projects'&&id" :key="id" :pid="id" :templates="data.templates||[]"/>
 <template v-else><div class="page-head"><div><h1>{{title}}</h1></div><div class="toolbar">
 <button v-if="(manager&&['customers','orders'].includes(page)||role('admin','manager')&&page==='contracts')||assignedButton()&&page==='tasks'" class="button primary" @click="openResource(page)">{{page==='tasks'?'＋ 新建派单':'＋ 新建'}}</button>
 <button class="button" v-if="page==='tasks'&&assignedButton()" @click="open('批量派单','BatchDispatch','/dispatch/batch')">批量派单</button><button class="button primary" v-if="page==='admin'&&sysTab==='users'&&admin" @click="editAccount()">开设账号</button><button v-if="page==='admin'&&sysTab==='users'&&admin" class="button" @click="download('/system/account-register.xlsx','账号岗位台账.xlsx')">导出岗位台账</button>
@@ -235,13 +238,19 @@ const dateLabel=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric
     <template #default="{row}"><button class="text-link" @click="showTemplate(row)">查看</button></template>
   </Grid>
 </section>
+<section v-else-if="page==='projects'" class="panel">
+  <Grid :rows="group(data.projects||[])" :cols="cols.projects">
+    <template #default="{row}"><a class="text-link" :href="'#/projects/'+row.id">查看与编写材料</a>
+      <button class="text-link" @click="download('/projects/'+row.id+'/evidence.zip','项目备查档案.zip')">项目备查档案</button></template>
+  </Grid>
+</section>
 <section v-else-if="inLibrary" class="panel">
   <Grid :rows="group(data.library||[])" :cols="[['name','模板文件'],['description','用途说明']]" :empty="filter?'没有匹配的模板。':reading?'正在读取模板…':admin?'模板库还没有文件。点击「上传模板」添加第一份模板。':'管理员上传的模板会显示在这里。'">
     <template #default="{row}"><button class="text-link" @click="download('/policies/library/'+row.id+'/download',row.name)">下载</button></template>
   </Grid>
 </section>
 <section v-else-if="page==='consultations'&&reviewer" class="panel"><Grid :rows="group(data.consultations||[])" :cols="[['title','任务'],['question','会审事项'],['state','状态'],['reply','会审意见']]"><template #default="{row}"><button v-if="row.state==='open'" class="text-link" @click="open('提交会审意见','Comment','/consultations/'+row.id+'/reply')">回复</button></template></Grid></section>
-<section v-else-if="cols[page]" class="panel"><Grid :rows="group(data[page]||[])" :cols="cols[page]"><template #default="{row}"><a class="text-link" v-if="page==='customers'" :href="'#/customers/'+row.id">客户全景 →</a><a class="text-link" v-else-if="['risks','notices'].includes(page)" :href="'#/tasks/'+row.task">前往处理 →</a><button v-else class="text-link" @click="snapshot=row">查看</button><button v-if="page==='projects'" class="text-link" @click="download('/projects/'+row.id+'/evidence.zip','项目备查档案.zip')">项目备查档案</button><button class="text-link" v-if="(role('admin','manager')&&page==='contracts'||manager&&page==='orders')" @click="openResource(page,row)">编辑</button><button v-if="page==='contracts'&&role('director')&&row.status==='draft'" class="text-link" @click="open('审核合同','Decision','/contracts/'+row.id+'/approve',{revision:row.revision},'post',['owner','consultant','result','version'])">审核</button></template></Grid></section>
+<section v-else-if="cols[page]" class="panel"><Grid :rows="group(data[page]||[])" :cols="cols[page]"><template #default="{row}"><a class="text-link" v-if="page==='customers'" :href="'#/customers/'+row.id">客户全景 →</a><a class="text-link" v-else-if="['risks','notices'].includes(page)" :href="'#/tasks/'+row.task">前往处理 →</a><button v-else class="text-link" @click="snapshot=row">查看</button><button class="text-link" v-if="(role('admin','manager')&&page==='contracts'||manager&&page==='orders')" @click="openResource(page,row)">编辑</button><button v-if="page==='contracts'&&role('director')&&row.status==='draft'" class="text-link" @click="open('审核合同','Decision','/contracts/'+row.id+'/approve',{revision:row.revision},'post',['owner','consultant','result','version'])">审核</button></template></Grid></section>
 </template>
 <section v-if="snapshot" class="panel panel-body evidence"><div class="panel-head"><h2>{{snapshot.payload?.title||snapshot.name||'记录详情'}}</h2><button class="button" @click="snapshot=null">关闭详情</button></div><template v-if="snapshot.payload?.values"><div v-if="snapshot.payload.layout?.category==='resolution'" class="letterhead"><strong>{{snapshot.payload.values['发文单位']}}文件</strong><p>{{snapshot.payload.issuance?.number||'草稿'}}</p></div><dl><template v-for="(val,k) in snapshot.payload.values"><dt>{{k}}</dt><dd>{{k==='年度预算合计'&&snapshot.payload.issuance?snapshot.payload.issuance.budget:val}}</dd></template></dl><template v-if="snapshot.payload.issuance"><h3>附件　年度立项科研项目清单</h3><Grid :cols="cols.projects" :rows="snapshot.payload.issuance.projects"/></template><button class="button" onclick="window.print()">打印 / 保存 PDF</button></template>
 <template v-else-if="snapshot.snapshot"><p>提交版本 {{snapshot.version}} · {{snapshot.snapshot.draft.summary}}</p><Grid :cols="cols.projects" :rows="snapshot.snapshot.draft.projects||[]"/><h3>当时的业务记录</h3><Grid :rows="snapshot.snapshot.entries||[]" :cols="[['key','单号'],['kind','类别'],['state','状态']]"/><h3>当时的证明文件</h3><Grid :rows="snapshot.snapshot.files||[]" :cols="[['name','材料'],['digest','文件指纹']]"/></template>

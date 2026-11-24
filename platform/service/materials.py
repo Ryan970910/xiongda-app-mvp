@@ -268,10 +268,12 @@ def templates(db:DB,u:Actor):
 def category_templates(category:str,db:DB,u:Actor):
     return ok([t for t in catalog(db).values() if t["category"]==category])
 
-def save_document(form,request,db,u,entry=None):
+def save_document(form,request,db,u,entry=None,layout=None):
     t=visible_task(db,u,form.task,True);require_writer(db,u,t);project_for(db,t,form.project)
     if entry and (entry.task!=t.id or entry.kind!="document"):fail(404,"文书不存在")
-    template=catalog(db).get(form.template)
+    if entry and entry.payload["template"] == form.template:
+        layout = entry.payload.get("layout")
+    template=layout or catalog(db).get(form.template)
     if not template:fail(422,"模板不存在")
     if set(form.values)!=set(template["fields"]) or any(not s.strip() or len(s)>10000 for s in form.values.values()):
         fail(422,"请完整填写所选模板的各个栏目")

@@ -133,3 +133,12 @@
 .template-preview h3 { margin: 18px 0 6px; font-size: 15px; }
 .template-preview p { margin: 0; }
 .template-preview ol { padding-left: 1.7em; line-height: 1.9; margin: 4px 0 0; }
+.project-writing .field-grid { margin: 14px 0 8px; }
+.project-writing label { display: grid; gap: 5px; }
+.project-writing select { padding: 8px; max-width: 100%; border: 1px solid #aab8cd; border-radius: 5px; background: white; }
+.project-writing summary { cursor: pointer; font-weight: 600; }
+.project-writing details + .button { margin-top: 14px; }
+.writing-row { padding: 12px 0; border-top: 1px solid #dbe3ed; overflow-wrap: anywhere; }
+.writing-row .toolbar { margin-top: 8px; }
+.writing-save { position: sticky; bottom: 0; padding: 12px 18px; border-top: 1px solid #dbe3ed; background: white; text-align: right; }
+.writing-editor .panel-head { position: sticky; top: 0; background: white; z-index: 1; }

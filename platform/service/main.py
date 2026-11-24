@@ -10,6 +10,7 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from . import auth, workflow, materials, finance, operations, local, imports, books, configuration
 from .db import Audit, Base, Department, Session, engine
+from . import project_writing
 
 def initialize():
     Base.metadata.create_all(engine)
@@ -32,6 +33,7 @@ app.include_router(books.router,prefix="/api/v1")
 app.include_router(configuration.router,prefix="/api/v1")
 app.include_router(operations.router,prefix="/api/v1")
 app.include_router(workflow.router,prefix="/api/v1")
+app.include_router(project_writing.router,prefix="/api/v1")
 
 def problem(status,message):
     return JSONResponse(status_code=status,content={"code":status,"message":message,"data":None})

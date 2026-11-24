@@ -97,6 +97,20 @@ def run(client):
     act("lead",rid,"audit")
     act("dispatch",rid,"audit",expected=403);act("review",rid,"audit")
     pid=call("finance","GET","/projects")["items"][0]["id"]
+    writing = f"/projects/{pid}/writing"
+    outline = next(t for t in templates if t["category"] == "technical")
+    first_field = outline["fields"][0]
+    initial = {"template": outline["id"], "title": "项目技术报告", "values": {first_field: "第一天的记录"}}
+    desk = call("research", "GET", writing)
+    assert desk["can_write"] and not desk["tasks"] and any(d["id"] == doc["id"] for d in desk["documents"])
+    call("finance", "POST", writing+"/drafts", initial, 403)
+    personal = call("research", "POST", writing+"/drafts", initial)
+    draft_url = writing+"/drafts/"+str(personal["id"])
+    assert call("research","GET",writing)["drafts"][0]["payload"]["values"][first_field] == "第一天的记录"
+    assert not call("finance", "GET", writing)["drafts"]
+    call("finance", "GET", draft_url+"/word", expected=404)
+    assert "word/document.xml" in zipfile.ZipFile(io.BytesIO(call("research","GET",draft_url+"/word"))).namelist()
+    call("research","PUT",draft_url,{**initial,"revision":999},409)
     from openpyxl import Workbook
     book=Workbook();ws=book.active;ws.append(["单号","项目编号","日期","凭证号","科目","费用类别","金额","摘要","申报明细行"])
     ws.append(["B1","RD-01",str(day),"材0","材料","直接投入",0,"进口样本",8])
@@ -160,6 +174,18 @@ def run(client):
     def newtask(kind,title):
         return call("dispatch","POST","/tasks",{"order_id":order,"owner":people["科研承办"],"assistants":[people["财务承办"]],"kind":kind,"line":"research","deadline":str(day+timedelta(days=5)),"title":title,"brief":"联办"})
     close=newtask("结题","联签验收")["id"];act("research",close,"accept");edit("research",close,"结题")
+    def move_draft(target, rev, expected=200):
+        return call("research","POST",draft_url+"/transfer",{"task":target,"revision":rev},expected)
+    move_draft(fid, personal["revision"], 422)
+    move_draft(close, personal["revision"], 422)
+    assert call("research","GET",writing)["drafts"][0]["id"] == personal["id"]
+    filled = {f:"科研记录 "+f for f in outline["fields"]}
+    personal = call("research","PUT",draft_url,{**initial,"values":filled,"revision":personal["revision"]})
+    transferred = move_draft(close, personal["revision"])
+    assert transferred["project"] == pid and transferred["payload"]["values"] == filled
+    desk = call("research","GET",writing)
+    assert not desk["drafts"] and any(d["id"]==transferred["id"] for d in desk["documents"])
+    move_draft(close, personal["revision"], 404)
     upload=client.post("/api/v1/materials/upload",data={"task":close,"project":pid,"category":"验收证据"},files={"file":("验收.docx",word)},headers=headers["research"]).json()["data"]
     evidence={"task":close,"project":pid,"file_id":upload["id"],"stage":"结题报告"}
     call("research","POST","/materials/link",{**evidence,"fee_id":999999},422)
